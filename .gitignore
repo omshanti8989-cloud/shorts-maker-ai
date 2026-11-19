@@ -16,7 +16,7 @@ temp/
 *.mp3
 *.wav
 *.log
-*.txt
+transcripts.txt
 
 # Backups and local launcher
 main_backup*.py
