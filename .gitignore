@@ -1,0 +1,27 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+.env.*
+.streamlit/secrets.toml
+
+# Generated files
+downloads/
+clips/
+temp/
+*.mp4
+*.mp3
+*.wav
+*.log
+*.txt
+
+# Backups and local launcher
+main_backup*.py
+test_captions.py
+Start*.bat
+
+# Other
+.DS_Store
