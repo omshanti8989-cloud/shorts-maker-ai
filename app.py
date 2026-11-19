@@ -139,7 +139,7 @@ if st.button("🚀 Generate Shorts", type="primary", use_container_width=True):
         st.exception(error)
 
 st.divider()
-st.caption("Shorts Maker AI • Python • Whisper Medium • FFmpeg")
+st.caption("Shorts Maker AI • Python • Whisper Tiny • FFmpeg")
 st.components.v1.html(
     """
     <script>

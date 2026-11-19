@@ -27,14 +27,22 @@ def process_video(video, number_of_shorts=5, progress_callback=None):
     if not os.path.isfile(video):
         raise FileNotFoundError(f"Video file not found: {video}")
 
-    report("Loading Whisper Medium speech-recognition model...", 0.03)
-    model = WhisperModel("medium", device="cpu", compute_type="int8")
+    # Tiny is substantially lighter and is a safer starting point on free cloud hosting.
+    # It trades some transcription accuracy for much lower RAM usage.
+    report("Loading Whisper Tiny speech-recognition model...", 0.03)
+    model = WhisperModel(
+        "tiny",
+        device="cpu",
+        compute_type="int8",
+        cpu_threads=2,
+        num_workers=1,
+    )
 
     report("Transcribing video. This can take several minutes...", 0.08)
     segments, info = model.transcribe(
         video,
         word_timestamps=True,
-        beam_size=5,
+        beam_size=1,
         vad_filter=True,
         condition_on_previous_text=True
     )
