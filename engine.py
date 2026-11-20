@@ -1,131 +1,97 @@
 import os
 import re
 import glob
+import html
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import yt_dlp
+from yt_dlp.utils import download_range_func
 from faster_whisper import WhisperModel
 
 
-def process_video(video, number_of_shorts=5, progress_callback=None):
-    """
-    Process an existing local video file into vertical Shorts.
-    Returns a list of finished video paths.
-    """
-    def report(message, progress=None):
-        if progress_callback:
-            progress_callback(message, progress)
+def _report(callback, message, progress=None):
+    if callback:
+        callback(message, progress)
 
-    project_dir = Path(__file__).resolve().parent
-    os.chdir(project_dir)
 
-    for folder in ["downloads", "clips", "subtitles", "fonts"]:
-        Path(folder).mkdir(exist_ok=True)
-
-    video = str(Path(video).resolve())
-    if not os.path.isfile(video):
-        raise FileNotFoundError(f"Video file not found: {video}")
-
-    # Tiny is substantially lighter and is a safer starting point on free cloud hosting.
-    # It trades some transcription accuracy for much lower RAM usage.
-    report("Loading Whisper Tiny speech-recognition model...", 0.03)
-    model = WhisperModel(
-        "tiny",
-        device="cpu",
-        compute_type="int8",
-        cpu_threads=2,
-        num_workers=1,
-    )
-
-    report("Transcribing video. This can take several minutes...", 0.08)
-    segments, info = model.transcribe(
-        video,
-        word_timestamps=True,
-        beam_size=1,
-        vad_filter=True,
-        condition_on_previous_text=True
-    )
-    segments = list(segments)
-    report(f"Transcription completed. Detected language: {info.language}", 0.55)
-
-    with open("transcript.txt", "w", encoding="utf-8") as file:
-        for segment in segments:
-            file.write(f"{segment.start:.2f} - {segment.end:.2f}: {segment.text}\n")
-
-    all_words = []
-    for segment in segments:
-        if not segment.words:
-            continue
-        for word in segment.words:
-            word_text = word.word.strip()
-            if word_text:
-                all_words.append({
-                    "start": word.start,
-                    "end": word.end,
-                    "text": word_text
-                })
-
-    if not all_words:
-        raise RuntimeError("No words were detected in the video.")
-
-    report("Finding potential highlights...", 0.58)
-    hook_words = [
-        "secret", "amazing", "shocking", "surprising",
-        "mistake", "important", "incredible", "unbelievable",
-        "never", "always", "truth", "why", "how",
-        "best", "worst", "dangerous", "finally",
-        "actually", "imagine", "remember", "discover"
+def _select_clips(segments, number_of_shorts):
+    candidates = []
+    strong_phrases = [
+        "you won't believe", "the truth is", "this is why",
+        "here's what happened", "nobody talks about",
+        "the biggest mistake", "what happens next",
+        "listen carefully", "i was shocked", "the secret to"
+    ]
+    strong_words = [
+        "secret", "shocking", "mistake", "amazing", "incredible",
+        "unbelievable", "dangerous", "truth", "insane", "crazy",
+        "surprising"
+    ]
+    curiosity_words = [
+        "why", "how", "what", "never", "actually",
+        "imagine", "discover", "finally", "because"
     ]
 
-    candidates = []
     for segment in segments:
-        start = segment.start
-        end = start + 45
-        selected = [s for s in segments if s.start >= start and s.end <= end]
+        start = float(segment.start)
+        end_limit = start + 45
+        selected = [s for s in segments if s.start >= start and s.end <= end_limit]
         if not selected:
             continue
-        actual_end = selected[-1].end
+        actual_end = float(selected[-1].end)
         duration = actual_end - start
         if duration < 25 or duration > 60:
             continue
 
         text = " ".join(s.text for s in selected).lower()
-        score = sum(
-            len(re.findall(r"\b" + re.escape(word) + r"\b", text))
-            for word in hook_words
+        score = sum(3 for phrase in strong_phrases if phrase in text)
+        score += sum(
+            len(re.findall(r"\b" + re.escape(word) + r"\b", text)) * 2
+            for word in strong_words
         )
-        score += text.count("?") * 2
-        score += text.count("!") * 2
+        score += sum(
+            len(re.findall(r"\b" + re.escape(word) + r"\b", text))
+            for word in curiosity_words
+        )
+        score += min(text.count("?"), 3) * 2
+        score += min(text.count("!"), 3) * 2
+        word_count = len(re.findall(r"\b\w+\b", text))
+        if 80 <= word_count <= 180:
+            score += 3
         candidates.append((score, start, actual_end, text))
 
-    candidates.sort(reverse=True, key=lambda x: x[0])
-
-    best_clips = []
+    candidates.sort(reverse=True, key=lambda item: item[0])
+    best = []
     for score, start, end, text in candidates:
-        if all(end <= old_start or start >= old_end for old_start, old_end in best_clips):
-            best_clips.append((start, end))
-        if len(best_clips) >= int(number_of_shorts):
+        if all(end <= old_start or start >= old_end for old_start, old_end in best):
+            best.append((start, end))
+        if len(best) >= int(number_of_shorts):
             break
+    return best
 
-    if not best_clips:
-        raise RuntimeError(
-            "No suitable 25–60 second clips were found. "
-            "Try a longer video with more speech."
-        )
 
-    report(f"Selected {len(best_clips)} potential highlights.", 0.62)
+def _ass_time(seconds):
+    total = round(seconds * 100)
+    hours = total // 360000
+    minutes = (total % 360000) // 6000
+    secs = (total % 6000) // 100
+    centiseconds = total % 100
+    return f"{hours}:{minutes:02}:{secs:02}.{centiseconds:02}"
 
-    def ass_time(seconds):
-        total = round(seconds * 100)
-        hours = total // 360000
-        minutes = (total % 360000) // 6000
-        secs = (total % 6000) // 100
-        centiseconds = total % 100
-        return f"{hours}:{minutes:02}:{secs:02}.{centiseconds:02}"
 
-    def create_animated_captions(words, output_file):
-        header = """[Script Info]
+def _srt_time(seconds):
+    milliseconds = round(seconds * 1000)
+    hours = milliseconds // 3600000
+    minutes = (milliseconds % 3600000) // 60000
+    seconds_part = (milliseconds % 60000) // 1000
+    ms = milliseconds % 1000
+    return f"{hours:02}:{minutes:02}:{seconds_part:02},{ms:03}"
+
+
+def _make_captions(words, index):
+    header = """[Script Info]
 Title: Shorts Maker Animated Captions
 ScriptType: v4.00+
 PlayResX: 1080
@@ -140,67 +106,246 @@ Style: Pop,Noto Sans Devanagari,81,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-        events = []
-        group_size = 4
-        for i in range(0, len(words), group_size):
-            group = words[i:i + group_size]
-            for active_index, active_word in enumerate(group):
-                start = active_word["start"]
-                end = active_word["end"]
-                if end <= start:
-                    continue
-                caption_parts = []
-                for j, item in enumerate(group):
-                    safe_word = re.sub(r"[{}\\]", "", item["text"])
-                    if j == active_index:
-                        caption_parts.append(
-                            r"{\c&H0000FFFF&\fscx115\fscy115"
-                            r"\t(0,120,\fscx100\fscy100)}"
-                            + safe_word + r"{\c&H00FFFFFF&}"
-                        )
-                    else:
-                        caption_parts.append(safe_word)
-                caption = " ".join(caption_parts)
-                events.append(
-                    f"Dialogue: 0,{ass_time(start)},{ass_time(end)},"
-                    f"Pop,,0,0,0,,{{\\an5\\pos(540,960)}}{caption}"
-                )
-        with open(output_file, "w", encoding="utf-8-sig") as file:
-            file.write(header)
-            file.write("\n".join(events))
+    events = []
+    group_size = 4
+    for i in range(0, len(words), group_size):
+        group = words[i:i + group_size]
+        for active_index, active_word in enumerate(group):
+            start, end = active_word["start"], active_word["end"]
+            if end <= start:
+                continue
+            parts = []
+            for j, item in enumerate(group):
+                safe_word = re.sub(r"[{}\\]", "", item["text"])
+                if j == active_index:
+                    parts.append(
+                        r"{\c&H0000FFFF&\fscx115\fscy115"
+                        r"\t(0,120,\fscx100\fscy100)}"
+                        + safe_word + r"{\c&H00FFFFFF&}"
+                    )
+                else:
+                    parts.append(safe_word)
+            caption = " ".join(parts)
+            events.append(
+                f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},"
+                f"Pop,,0,0,0,,{{\\an5\\pos(540,960)}}{caption}"
+            )
 
-    def srt_time(seconds):
-        milliseconds = round(seconds * 1000)
-        hours = milliseconds // 3600000
-        minutes = (milliseconds % 3600000) // 60000
-        seconds_part = (milliseconds % 60000) // 1000
-        ms = milliseconds % 1000
-        return f"{hours:02}:{minutes:02}:{seconds_part:02},{ms:03}"
+    ass_path = Path(f"subtitles/clip_{index}.ass")
+    ass_path.write_text(header + "\n".join(events), encoding="utf-8-sig")
 
-    # Remove old generated clips so the website only displays this run's output.
+    srt_lines = []
+    for number, word in enumerate(words, 1):
+        srt_lines.append(
+            f"{number}\n{_srt_time(word['start'])} --> "
+            f"{_srt_time(word['end'])}\n{word['text']}\n"
+        )
+    Path(f"subtitles/clip_{index}.srt").write_text(
+        "\n".join(srt_lines), encoding="utf-8"
+    )
+    return str(ass_path)
+
+
+def _render_vertical(input_video, output_video, subtitle_file):
+    font_folder = os.path.abspath("fonts").replace("\\", "/").replace(":", r"\:")
+    subtitle_path = os.path.abspath(subtitle_file).replace("\\", "/").replace(":", r"\:")
+    video_filter = (
+        "scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,"
+        f"ass='{subtitle_path}':fontsdir='{font_folder}'"
+    )
+    subprocess.run([
+        "ffmpeg", "-y", "-i", str(input_video),
+        "-vf", video_filter,
+        "-map", "0:v:0", "-map", "0:a?",
+        "-c:v", "libx264", "-c:a", "aac",
+        "-preset", "fast", str(output_video)
+    ], check=True)
+
+
+def _prepare_folders():
+    for folder in ["downloads", "clips", "subtitles", "fonts"]:
+        Path(folder).mkdir(exist_ok=True)
     for pattern in [
-        "clips/clip_*.mp4",
-        "clips/vertical_clip_*.mp4",
-        "subtitles/clip_*.ass",
-        "subtitles/clip_*.srt"
+        "clips/clip_*.mp4", "clips/vertical_clip_*.mp4",
+        "subtitles/clip_*.ass", "subtitles/clip_*.srt"
     ]:
         for old_file in glob.glob(pattern):
             os.remove(old_file)
 
+
+def _transcribe(audio_or_video, callback):
+    _report(callback, "Loading Whisper Tiny speech-recognition model...", 0.03)
+    model = WhisperModel(
+        "tiny", device="cpu", compute_type="int8",
+        cpu_threads=2, num_workers=1
+    )
+    _report(callback, "Transcribing the complete audio. This may take several minutes...", 0.08)
+    segments, info = model.transcribe(
+        str(audio_or_video), word_timestamps=True, beam_size=1,
+        vad_filter=True, condition_on_previous_text=True
+    )
+    segments = list(segments)
+    _report(callback, f"Transcription completed. Detected language: {info.language}", 0.55)
+
+    with open("transcript.txt", "w", encoding="utf-8") as file:
+        for segment in segments:
+            file.write(f"{segment.start:.2f} - {segment.end:.2f}: {segment.text}\n")
+
+    words = []
+    for segment in segments:
+        for word in (segment.words or []):
+            text = word.word.strip()
+            if text:
+                words.append({
+                    "start": float(word.start),
+                    "end": float(word.end),
+                    "text": text
+                })
+    if not words:
+        raise RuntimeError("No spoken words were detected in the audio.")
+    return segments, words
+
+
+def _parse_vtt(vtt_text):
+    """Convert WebVTT caption cues into timestamped transcript segments."""
+    segments = []
+    lines = vtt_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    timestamp_pattern = re.compile(
+        r"(?:(\d{1,2}):)?(\d{2}):(\d{2})[.,](\d{3})\s+-->\s+"
+        r"(?:(\d{1,2}):)?(\d{2}):(\d{2})[.,](\d{3})"
+    )
+
+    i = 0
+    while i < len(lines):
+        match = timestamp_pattern.search(lines[i])
+        if not match:
+            i += 1
+            continue
+
+        groups = match.groups()
+        start_hours = int(groups[0] or 0)
+        start = start_hours * 3600 + int(groups[1]) * 60 + int(groups[2]) + int(groups[3]) / 1000
+        end_hours = int(groups[4] or 0)
+        end = end_hours * 3600 + int(groups[5]) * 60 + int(groups[6]) + int(groups[7]) / 1000
+
+        i += 1
+        cue_lines = []
+        while i < len(lines) and lines[i].strip():
+            line = lines[i].strip()
+            if not line.startswith(("NOTE", "STYLE", "REGION")):
+                cue_lines.append(line)
+            i += 1
+
+        text = " ".join(cue_lines)
+        text = re.sub(r"<[^>]+>", "", text)
+        text = html.unescape(text).replace("&lrm;", "").replace("&rlm;", "")
+        text = re.sub(r"\s+", " ", text).strip()
+        # Remove repeated rolling-caption text where possible.
+        if text and end > start:
+            if segments and text == segments[-1].text:
+                segments[-1].end = max(segments[-1].end, end)
+            else:
+                segments.append(SimpleNamespace(start=start, end=end, text=text))
+        i += 1
+
+    return segments
+
+
+def _caption_words(segments):
+    """Create approximate word timings from caption cue timings for subtitle display."""
+    words = []
+    for segment in segments:
+        cue_words = segment.text.split()
+        if not cue_words:
+            continue
+        duration = max(0.15, float(segment.end) - float(segment.start))
+        step = duration / len(cue_words)
+        for index, word in enumerate(cue_words):
+            start = float(segment.start) + index * step
+            end = float(segment.start) + (index + 1) * step
+            words.append({
+                "start": start,
+                "end": max(start + 0.08, end),
+                "text": word
+            })
+    return words
+
+
+def _fetch_youtube_captions(url, callback):
+    """Try manual or automatic YouTube captions without downloading media."""
+    _report(callback, "Checking YouTube captions (no audio/video download)...", 0.03)
+
+    inspect_options = {
+        "skip_download": True,
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "js_runtimes": {"deno": {}},
+        "remote_components": ["ejs:github"],
+    }
+    with yt_dlp.YoutubeDL(inspect_options) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    caption_sets = info.get("subtitles") or {}
+    automatic_sets = info.get("automatic_captions") or {}
+    available = caption_sets or automatic_sets
+    if not available:
+        return None
+
+    # Prefer English, then the video's original/first available caption language.
+    languages = list(available.keys())
+    language = next((lang for lang in languages if lang.lower() in ("en", "en-us", "en-gb")), None)
+    if language is None:
+        language = next((lang for lang in languages if lang.lower().startswith("en-")), None)
+    if language is None:
+        language = languages[0]
+
+    _report(callback, f"Found YouTube captions ({language}). Fetching transcript...", 0.06)
+    subtitle_options = {
+        "skip_download": True,
+        "writesubtitles": True,
+        "writeautomaticsubtitles": True,
+        "subtitleslangs": [language],
+        "subtitlesformat": "vtt",
+        "outtmpl": str(Path("downloads") / "youtube_caption.%(ext)s"),
+        "overwrites": True,
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "js_runtimes": {"deno": {}},
+        "remote_components": ["ejs:github"],
+    }
+    with yt_dlp.YoutubeDL(subtitle_options) as ydl:
+        ydl.download([url])
+
+    caption_files = sorted(Path("downloads").glob("youtube_caption*.vtt"))
+    if not caption_files:
+        return None
+
+    vtt_text = caption_files[0].read_text(encoding="utf-8", errors="replace")
+    segments = _parse_vtt(vtt_text)
+    if not segments:
+        return None
+
+    words = _caption_words(segments)
+    if not words:
+        return None
+
+    with open("transcript.txt", "w", encoding="utf-8") as file:
+        for segment in segments:
+            file.write(f"{segment.start:.2f} - {segment.end:.2f}: {segment.text}\n")
+
+    return segments, words
+
+
+def _finish_clips(best_clips, all_words, get_clip, number_of_shorts, callback):
     total = len(best_clips)
+    finished = []
     for i, (start, end) in enumerate(best_clips, 1):
-        report(f"Creating clip {i} of {total}...", 0.64 + (i - 1) / total * 0.12)
-        clip_path = f"clips/clip_{i}.mp4"
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-ss", str(start),
-            "-i", video,
-            "-t", str(end - start),
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            "-preset", "fast",
-            clip_path
-        ], check=True)
+        _report(callback, f"Getting selected video segment {i} of {total}...", 0.62 + (i - 1) / total * 0.12)
+        clip_path = Path(f"clips/clip_{i}.mp4")
+        get_clip(start, end, clip_path)
 
         clip_words = [
             {
@@ -211,47 +356,125 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             for word in all_words
             if word["start"] >= start and word["end"] <= end
         ]
+        subtitle_path = _make_captions(clip_words, i)
 
-        with open(f"subtitles/clip_{i}.srt", "w", encoding="utf-8") as subtitle_file:
-            for number, word in enumerate(clip_words, 1):
-                subtitle_file.write(
-                    f"{number}\n"
-                    f"{srt_time(word['start'])} --> {srt_time(word['end'])}\n"
-                    f"{word['text']}\n\n"
-                )
+        _report(callback, f"Rendering vertical Short {i} of {total}...", 0.78 + (i - 1) / total * 0.20)
+        output_path = Path(f"clips/vertical_clip_{i}.mp4")
+        _render_vertical(clip_path, output_path, subtitle_path)
+        finished.append(str(output_path.resolve()))
 
-        create_animated_captions(clip_words, f"subtitles/clip_{i}.ass")
+    _report(callback, "All Shorts have been created!", 1.0)
+    return finished
 
-    def make_vertical_video(input_video, output_video, subtitle_file):
-        font_folder = os.path.abspath("fonts").replace("\\", "/")
-        subtitle_path = os.path.abspath(subtitle_file).replace("\\", "/")
-        font_folder = font_folder.replace(":", r"\:")
-        subtitle_path = subtitle_path.replace(":", r"\:")
-        video_filter = (
-            "scale=1080:1920:force_original_aspect_ratio=increase,"
-            "crop=1080:1920,"
-            f"ass='{subtitle_path}':fontsdir='{font_folder}'"
-        )
+
+def process_video(video, number_of_shorts=5, progress_callback=None):
+    """Process an uploaded local video file into vertical Shorts."""
+    project_dir = Path(__file__).resolve().parent
+    os.chdir(project_dir)
+    _prepare_folders()
+
+    video = Path(video).resolve()
+    if not video.is_file():
+        raise FileNotFoundError(f"Video file not found: {video}")
+
+    segments, words = _transcribe(video, progress_callback)
+    _report(progress_callback, "Finding potential highlights...", 0.58)
+    best_clips = _select_clips(segments, number_of_shorts)
+    if not best_clips:
+        raise RuntimeError("No suitable 25–60 second clips were found. Try a longer video with more speech.")
+
+    def local_clip(start, end, output):
         subprocess.run([
-            "ffmpeg", "-y",
-            "-i", input_video,
-            "-vf", video_filter,
-            "-map", "0:v:0",
-            "-map", "0:a?",
-            "-c:v", "libx264",
-            "-c:a", "aac",
-            "-preset", "fast",
-            output_video
+            "ffmpeg", "-y", "-ss", str(start), "-i", str(video),
+            "-t", str(end - start), "-c:v", "libx264", "-c:a", "aac",
+            "-preset", "fast", str(output)
         ], check=True)
 
-    finished = []
-    for i in range(1, total + 1):
-        report(f"Rendering vertical Short {i} of {total}...", 0.78 + (i - 1) / total * 0.20)
-        input_path = f"clips/clip_{i}.mp4"
-        output_path = f"clips/vertical_clip_{i}.mp4"
-        subtitle_path = f"subtitles/clip_{i}.ass"
-        make_vertical_video(input_path, output_path, subtitle_path)
-        finished.append(str((project_dir / output_path).resolve()))
+    return _finish_clips(best_clips, words, local_clip, number_of_shorts, progress_callback)
 
-    report("All Shorts have been created!", 1.0)
-    return finished
+
+def process_youtube_video(url, number_of_shorts=5, progress_callback=None):
+    """
+    First analyse available YouTube captions without downloading media.
+    If captions are unavailable, fall back to downloading audio only.
+    Only selected video ranges are then requested from YouTube.
+    """
+    project_dir = Path(__file__).resolve().parent
+    os.chdir(project_dir)
+    _prepare_folders()
+
+    url = (url or "").strip()
+    if not url:
+        raise ValueError("Please enter a YouTube URL.")
+
+    caption_result = None
+    try:
+        caption_result = _fetch_youtube_captions(url, progress_callback)
+    except Exception as error:
+        _report(progress_callback, f"Could not retrieve YouTube captions ({error}). Trying audio analysis...", 0.07)
+
+    if caption_result:
+        segments, words = caption_result
+        _report(progress_callback, "Complete YouTube transcript loaded. Finding the strongest moments...", 0.58)
+    else:
+        _report(progress_callback, "Captions unavailable. Downloading audio only for complete analysis...", 0.02)
+        audio_template = str((project_dir / "downloads" / "youtube_audio.%(ext)s"))
+        audio_options = {
+            "format": "bestaudio/best",
+            "outtmpl": audio_template,
+            "noplaylist": True,
+            "overwrites": True,
+            "quiet": True,
+            "no_warnings": True,
+            "js_runtimes": {"deno": {}},
+            "remote_components": ["ejs:github"],
+        }
+        with yt_dlp.YoutubeDL(audio_options) as ydl:
+            info = ydl.extract_info(url, download=True)
+            audio_path = Path(ydl.prepare_filename(info))
+
+        if not audio_path.exists():
+            matches = list((project_dir / "downloads").glob("youtube_audio.*"))
+            matches = [p for p in matches if not p.name.endswith((".part", ".ytdl"))]
+            if not matches:
+                raise RuntimeError("The YouTube audio download could not be found.")
+            audio_path = matches[0]
+
+        segments, words = _transcribe(audio_path, progress_callback)
+
+    best_clips = _select_clips(segments, number_of_shorts)
+    if not best_clips:
+        raise RuntimeError("No suitable 25–60 second clips were found. Try a longer recording with more speech.")
+
+    def download_selected_range(start, end, output):
+        options = {
+            "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+            "outtmpl": str(output.with_suffix(".%(ext)s")),
+            "merge_output_format": "mp4",
+            "noplaylist": True,
+            "overwrites": True,
+            "quiet": True,
+            "no_warnings": True,
+            "download_ranges": download_range_func(None, [(start, end)]),
+            "force_keyframes_at_cuts": True,
+            "js_runtimes": {"deno": {}},
+            "remote_components": ["ejs:github"],
+        }
+        with yt_dlp.YoutubeDL(options) as ydl:
+            ydl.download([url])
+
+        matches = list(output.parent.glob(output.stem + ".*"))
+        matches = [
+            p for p in matches
+            if p.is_file() and not p.name.endswith((".part", ".ytdl"))
+            and p.suffix.lower() in {".mp4", ".mkv", ".webm"}
+        ]
+        if not matches:
+            raise RuntimeError(f"Could not download selected YouTube segment {start:.1f}–{end:.1f}s.")
+        chosen = next((p for p in matches if p.suffix.lower() == ".mp4"), matches[0])
+        if chosen != output:
+            if output.exists():
+                output.unlink()
+            chosen.replace(output)
+
+    return _finish_clips(best_clips, words, download_selected_range, number_of_shorts, progress_callback)
