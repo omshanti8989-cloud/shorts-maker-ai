@@ -395,58 +395,54 @@ def process_video(video, number_of_shorts=5, progress_callback=None):
 
 def process_youtube_video(url, number_of_shorts=5, progress_callback=None):
     """
-    First analyse available YouTube captions without downloading media.
-    If captions are unavailable, fall back to downloading audio only.
-    Only selected video ranges are then requested from YouTube.
+    Process YouTube videos using captions only.
+    Never download full audio.
     """
+
     project_dir = Path(__file__).resolve().parent
     os.chdir(project_dir)
     _prepare_folders()
 
     url = (url or "").strip()
+
     if not url:
         raise ValueError("Please enter a YouTube URL.")
 
-    caption_result = None
     try:
-        caption_result = _fetch_youtube_captions(url, progress_callback)
+        caption_result = _fetch_youtube_captions(
+            url, progress_callback
+        )
     except Exception as error:
-        _report(progress_callback, f"Could not retrieve YouTube captions ({error}). Trying audio analysis...", 0.07)
+        raise RuntimeError(
+            f"YouTube caption retrieval failed: {error}. "
+            "No audio was downloaded."
+        ) from error
 
-    if caption_result:
-        segments, words = caption_result
-        _report(progress_callback, "Complete YouTube transcript loaded. Finding the strongest moments...", 0.58)
-    else:
-        _report(progress_callback, "Captions unavailable. Downloading audio only for complete analysis...", 0.02)
-        audio_template = str((project_dir / "downloads" / "youtube_audio.%(ext)s"))
-        audio_options = {
-            "format": "bestaudio/best",
-            "outtmpl": audio_template,
-            "noplaylist": True,
-            "overwrites": True,
-            "quiet": True,
-            "no_warnings": True,
-            "js_runtimes": {"deno": {}},
-            "remote_components": ["ejs:github"],
-        }
-        with yt_dlp.YoutubeDL(audio_options) as ydl:
-            info = ydl.extract_info(url, download=True)
-            audio_path = Path(ydl.prepare_filename(info))
+    if not caption_result:
+        raise RuntimeError(
+            "No usable YouTube captions were found. "
+            "Full audio downloading is disabled."
+        )
 
-        if not audio_path.exists():
-            matches = list((project_dir / "downloads").glob("youtube_audio.*"))
-            matches = [p for p in matches if not p.name.endswith((".part", ".ytdl"))]
-            if not matches:
-                raise RuntimeError("The YouTube audio download could not be found.")
-            audio_path = matches[0]
+    segments, words = caption_result
 
-        segments, words = _transcribe(audio_path, progress_callback)
+    _report(
+        progress_callback,
+        "Captions loaded! Finding the strongest moments...",
+        0.58
+    )
 
-    best_clips = _select_clips(segments, number_of_shorts)
+    best_clips = _select_clips(
+        segments, number_of_shorts
+    )
+
     if not best_clips:
-        raise RuntimeError("No suitable 25–60 second clips were found. Try a longer recording with more speech.")
+        raise RuntimeError(
+            "No suitable clips found. Try another video."
+        )
 
     def download_selected_range(start, end, output):
+
         options = {
             "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
             "outtmpl": str(output.with_suffix(".%(ext)s")),
@@ -455,26 +451,51 @@ def process_youtube_video(url, number_of_shorts=5, progress_callback=None):
             "overwrites": True,
             "quiet": True,
             "no_warnings": True,
-            "download_ranges": download_range_func(None, [(start, end)]),
+            "download_ranges": download_range_func(
+                None, [(start, end)]
+            ),
             "force_keyframes_at_cuts": True,
             "js_runtimes": {"deno": {}},
             "remote_components": ["ejs:github"],
         }
+
         with yt_dlp.YoutubeDL(options) as ydl:
             ydl.download([url])
 
-        matches = list(output.parent.glob(output.stem + ".*"))
+        matches = list(
+            output.parent.glob(output.stem + ".*")
+        )
+
         matches = [
             p for p in matches
-            if p.is_file() and not p.name.endswith((".part", ".ytdl"))
-            and p.suffix.lower() in {".mp4", ".mkv", ".webm"}
+            if p.is_file()
+            and not p.name.endswith((".part", ".ytdl"))
+            and p.suffix.lower() in {
+                ".mp4", ".mkv", ".webm"
+            }
         ]
+
         if not matches:
-            raise RuntimeError(f"Could not download selected YouTube segment {start:.1f}–{end:.1f}s.")
-        chosen = next((p for p in matches if p.suffix.lower() == ".mp4"), matches[0])
+            raise RuntimeError(
+                f"Could not download video segment "
+                f"{start:.1f}-{end:.1f}s."
+            )
+
+        chosen = next(
+            (p for p in matches if p.suffix.lower() == ".mp4"),
+            matches[0]
+        )
+
         if chosen != output:
             if output.exists():
                 output.unlink()
+
             chosen.replace(output)
 
-    return _finish_clips(best_clips, words, download_selected_range, number_of_shorts, progress_callback)
+    return _finish_clips(
+        best_clips,
+        words,
+        download_selected_range,
+        number_of_shorts,
+        progress_callback
+    )
