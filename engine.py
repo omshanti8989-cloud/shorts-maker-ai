@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import yt_dlp
-from yt_dlp.utils import download_range_func
 from faster_whisper import WhisperModel
 
 
@@ -241,7 +240,6 @@ def _parse_vtt(vtt_text):
         text = re.sub(r"<[^>]+>", "", text)
         text = html.unescape(text).replace("&lrm;", "").replace("&rlm;", "")
         text = re.sub(r"\s+", " ", text).strip()
-        # Remove repeated rolling-caption text where possible.
         if text and end > start:
             if segments and text == segments[-1].text:
                 segments[-1].end = max(segments[-1].end, end)
@@ -273,10 +271,18 @@ def _caption_words(segments):
 
 
 def _fetch_youtube_captions(url, callback):
-    """Try manual or automatic YouTube captions without downloading media."""
-    _report(callback, "Checking YouTube captions (no audio/video download)...", 0.03)
+    """Fetch manual or automatic YouTube captions and parse the downloaded VTT."""
+    _report(callback, "Checking YouTube captions...", 0.03)
 
-    inspect_options = {
+    download_dir = Path("downloads")
+    download_dir.mkdir(parents=True, exist_ok=True)
+
+    # Remove old caption files so a previous run cannot be mistaken for this one.
+    for old_file in download_dir.glob("youtube_caption*"):
+        if old_file.is_file():
+            old_file.unlink()
+
+    common_options = {
         "skip_download": True,
         "quiet": True,
         "no_warnings": True,
@@ -284,58 +290,79 @@ def _fetch_youtube_captions(url, callback):
         "js_runtimes": {"deno": {}},
         "remote_components": ["ejs:github"],
     }
-    with yt_dlp.YoutubeDL(inspect_options) as ydl:
+
+    with yt_dlp.YoutubeDL(common_options) as ydl:
         info = ydl.extract_info(url, download=False)
 
-    caption_sets = info.get("subtitles") or {}
-    automatic_sets = info.get("automatic_captions") or {}
-    available = caption_sets or automatic_sets
+    manual = info.get("subtitles") or {}
+    automatic = info.get("automatic_captions") or {}
+    available = dict(automatic)
+    available.update(manual)
+
     if not available:
         return None
 
-    # Prefer English, then the video's original/first available caption language.
     languages = list(available.keys())
-    language = next((lang for lang in languages if lang.lower() in ("en", "en-us", "en-gb")), None)
+    language = next(
+        (lang for lang in languages if lang.lower() in ("en", "en-us", "en-gb")),
+        None
+    )
     if language is None:
-        language = next((lang for lang in languages if lang.lower().startswith("en-")), None)
+        language = next(
+            (lang for lang in languages if lang.lower().startswith("en-")),
+            None
+        )
     if language is None:
         language = languages[0]
 
+    has_manual_track = bool(manual.get(language))
     _report(callback, f"Found YouTube captions ({language}). Fetching transcript...", 0.06)
+
     subtitle_options = {
-        "skip_download": True,
-        "writesubtitles": True,
+        **common_options,
+        "writesubtitles": has_manual_track,
         "writeautomaticsubtitles": True,
         "subtitleslangs": [language],
-        "subtitlesformat": "vtt",
-        "outtmpl": str(Path("downloads") / "youtube_caption.%(ext)s"),
+        "subtitlesformat": "vtt/best",
+        "outtmpl": str(download_dir / "youtube_caption.%(ext)s"),
         "overwrites": True,
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "js_runtimes": {"deno": {}},
-        "remote_components": ["ejs:github"],
     }
+
     with yt_dlp.YoutubeDL(subtitle_options) as ydl:
         ydl.download([url])
 
-    caption_files = sorted(Path("downloads").glob("youtube_caption*.vtt"))
-    if not caption_files:
-        return None
+    caption_files = [
+        p for p in download_dir.glob("youtube_caption*")
+        if p.is_file() and p.suffix.lower() == ".vtt"
+    ]
 
-    vtt_text = caption_files[0].read_text(encoding="utf-8", errors="replace")
+    if not caption_files:
+        found = [p.name for p in download_dir.glob("youtube_caption*") if p.is_file()]
+        raise RuntimeError(
+            "YouTube reported captions, but yt-dlp did not create a VTT file. "
+            f"Files found: {found}"
+        )
+
+    vtt_file = sorted(caption_files)[0]
+    vtt_text = vtt_file.read_text(encoding="utf-8", errors="replace")
     segments = _parse_vtt(vtt_text)
+
     if not segments:
-        return None
+        preview = vtt_text[:500].replace("\n", " ")
+        raise RuntimeError(
+            "The downloaded VTT file contained no readable caption cues. "
+            f"File: {vtt_file.name}. Preview: {preview}"
+        )
 
     words = _caption_words(segments)
     if not words:
-        return None
+        raise RuntimeError("Caption segments were found, but word timings could not be generated.")
 
     with open("transcript.txt", "w", encoding="utf-8") as file:
         for segment in segments:
             file.write(f"{segment.start:.2f} - {segment.end:.2f}: {segment.text}\n")
 
+    _report(callback, "Transcript extracted successfully!", 0.15)
     return segments, words
 
 
@@ -394,73 +421,48 @@ def process_video(video, number_of_shorts=5, progress_callback=None):
 
 
 def process_youtube_video(url, number_of_shorts=5, progress_callback=None):
-    """
-    Process YouTube videos using captions only.
-    Never download full audio.
-    """
-
+    """Use YouTube captions for analysis, then download source video once and cut clips locally."""
     project_dir = Path(__file__).resolve().parent
     os.chdir(project_dir)
     _prepare_folders()
 
     url = (url or "").strip()
-
     if not url:
         raise ValueError("Please enter a YouTube URL.")
 
     try:
-        caption_result = _fetch_youtube_captions(
-            url, progress_callback
-        )
+        caption_result = _fetch_youtube_captions(url, progress_callback)
     except Exception as error:
         raise RuntimeError(
-            f"YouTube caption retrieval failed: {error}. "
-            "No audio was downloaded."
+            f"YouTube caption retrieval failed: {error}. No audio was downloaded."
         ) from error
 
     if not caption_result:
         raise RuntimeError(
-            "No usable YouTube captions were found. "
-            "Full audio downloading is disabled."
+            "No usable YouTube captions were found. Full audio downloading is disabled."
         )
 
     segments, words = caption_result
+    _report(callback=progress_callback, message="Captions loaded! Finding the strongest moments...", progress=0.58)
 
-    _report(
-        progress_callback,
-        "Captions loaded! Finding the strongest moments...",
-        0.58
-    )
-
-    best_clips = _select_clips(
-        segments, number_of_shorts
-    )
-
+    best_clips = _select_clips(segments, number_of_shorts)
     if not best_clips:
-        raise RuntimeError(
-            "No suitable clips found. Try another video."
-        )
+        raise RuntimeError("No suitable clips found. Try another video.")
 
     def download_selected_range(start, end, output):
-
         output.parent.mkdir(parents=True, exist_ok=True)
-
-        source_pattern = output.parent / "source_video.*"
 
         source_files = [
             p for p in output.parent.glob("source_video.*")
-            if p.is_file()
-            and p.suffix.lower() in {
-                ".mp4", ".mkv", ".webm"
-            }
+            if p.is_file() and p.suffix.lower() in {".mp4", ".mkv", ".webm"}
         ]
 
         if not source_files:
             options = {
                 "format": "bestvideo*+bestaudio/best",
                 "js_runtimes": {"deno": {}},
-"remote_components": ["ejs:github"],
-                "outtmpl": str(source_pattern),
+                "remote_components": ["ejs:github"],
+                "outtmpl": str(output.parent / "source_video.%(ext)s"),
                 "noplaylist": True,
                 "quiet": True,
                 "no_warnings": True,
@@ -471,25 +473,18 @@ def process_youtube_video(url, number_of_shorts=5, progress_callback=None):
 
             source_files = [
                 p for p in output.parent.glob("source_video.*")
-                if p.is_file()
-                and p.suffix.lower() in {
-                    ".mp4", ".mkv", ".webm"
-                }
+                if p.is_file() and p.suffix.lower() in {".mp4", ".mkv", ".webm"}
             ]
 
         if not source_files:
             raise RuntimeError("Source video download failed.")
 
         source = source_files[0]
-
-        duration = end - start
-
         command = [
-            "ffmpeg",
-            "-y",
+            "ffmpeg", "-y",
             "-ss", str(start),
             "-i", str(source),
-            "-t", str(duration),
+            "-t", str(end - start),
             "-c:v", "libx264",
             "-preset", "veryfast",
             "-crf", "23",
@@ -498,16 +493,10 @@ def process_youtube_video(url, number_of_shorts=5, progress_callback=None):
             str(output)
         ]
 
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True
-        )
-
+        result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(
-                "FFmpeg clip creation failed: "
-                + result.stderr[-2000:]
+                "FFmpeg clip creation failed: " + result.stderr[-2000:]
             )
 
         if not output.exists() or output.stat().st_size == 0:
