@@ -443,54 +443,73 @@ def process_youtube_video(url, number_of_shorts=5, progress_callback=None):
 
     def download_selected_range(start, end, output):
 
-        options = {
-            "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-            "outtmpl": str(output.with_suffix(".%(ext)s")),
-            "merge_output_format": "mp4",
-            "noplaylist": True,
-            "overwrites": True,
-            "quiet": True,
-            "no_warnings": True,
-            "download_ranges": download_range_func(
-                None, [(start, end)]
-            ),
-            "force_keyframes_at_cuts": True,
-            "js_runtimes": {"deno": {}},
-            "remote_components": ["ejs:github"],
-        }
+        output.parent.mkdir(parents=True, exist_ok=True)
 
-        with yt_dlp.YoutubeDL(options) as ydl:
-            ydl.download([url])
+        source_pattern = output.parent / "source_video.*"
 
-        matches = list(
-            output.parent.glob(output.stem + ".*")
-        )
-
-        matches = [
-            p for p in matches
+        source_files = [
+            p for p in output.parent.glob("source_video.*")
             if p.is_file()
-            and not p.name.endswith((".part", ".ytdl"))
             and p.suffix.lower() in {
                 ".mp4", ".mkv", ".webm"
             }
         ]
 
-        if not matches:
-            raise RuntimeError(
-                f"Could not download video segment "
-                f"{start:.1f}-{end:.1f}s."
-            )
+        if not source_files:
+            options = {
+                "format": "best[height<=720]/best",
+                "outtmpl": str(source_pattern),
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+            }
 
-        chosen = next(
-            (p for p in matches if p.suffix.lower() == ".mp4"),
-            matches[0]
+            with yt_dlp.YoutubeDL(options) as ydl:
+                ydl.download([url])
+
+            source_files = [
+                p for p in output.parent.glob("source_video.*")
+                if p.is_file()
+                and p.suffix.lower() in {
+                    ".mp4", ".mkv", ".webm"
+                }
+            ]
+
+        if not source_files:
+            raise RuntimeError("Source video download failed.")
+
+        source = source_files[0]
+
+        duration = end - start
+
+        command = [
+            "ffmpeg",
+            "-y",
+            "-ss", str(start),
+            "-i", str(source),
+            "-t", str(duration),
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+            "-c:a", "aac",
+            "-movflags", "+faststart",
+            str(output)
+        ]
+
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True
         )
 
-        if chosen != output:
-            if output.exists():
-                output.unlink()
+        if result.returncode != 0:
+            raise RuntimeError(
+                "FFmpeg clip creation failed: "
+                + result.stderr[-2000:]
+            )
 
-            chosen.replace(output)
+        if not output.exists() or output.stat().st_size == 0:
+            raise RuntimeError("Generated clip is empty.")
 
     return _finish_clips(
         best_clips,
