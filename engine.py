@@ -457,7 +457,9 @@ def process_youtube_video(url, number_of_shorts=5, progress_callback=None):
 
         if not source_files:
             options = {
-                "format": "best[height<=720]/best",
+                "format": "bestvideo*+bestaudio/best",
+                "js_runtimes": {"deno": {}},
+"remote_components": ["ejs:github"],
                 "outtmpl": str(source_pattern),
                 "noplaylist": True,
                 "quiet": True,
