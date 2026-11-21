@@ -3,6 +3,7 @@ import re
 import glob
 import html
 import subprocess
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -271,13 +272,12 @@ def _caption_words(segments):
 
 
 def _fetch_youtube_captions(url, callback):
-    """Fetch manual or automatic YouTube captions and parse the downloaded VTT."""
+    """Retrieve YouTube captions, trying yt-dlp subtitle download and direct caption URLs."""
     _report(callback, "Checking YouTube captions...", 0.03)
 
     download_dir = Path("downloads")
     download_dir.mkdir(parents=True, exist_ok=True)
 
-    # Remove old caption files so a previous run cannot be mistaken for this one.
     for old_file in download_dir.glob("youtube_caption*"):
         if old_file.is_file():
             old_file.unlink()
@@ -296,64 +296,116 @@ def _fetch_youtube_captions(url, callback):
 
     manual = info.get("subtitles") or {}
     automatic = info.get("automatic_captions") or {}
-    available = dict(automatic)
-    available.update(manual)
 
-    if not available:
+    # Prefer English, including YouTube's newer en-orig/en-US variants.
+    all_languages = list(dict.fromkeys(list(manual.keys()) + list(automatic.keys())))
+    if not all_languages:
         return None
 
-    languages = list(available.keys())
-    language = next(
-        (lang for lang in languages if lang.lower() in ("en", "en-us", "en-gb")),
-        None
+    def language_rank(code):
+        code = code.lower()
+        if code in ("en", "en-us", "en-gb", "en-orig"):
+            return 0
+        if code.startswith("en-"):
+            return 1
+        return 2
+
+    all_languages.sort(key=language_rank)
+    preferred_languages = all_languages
+
+    # Try manual captions first, then automatic captions for each matching language.
+    track_attempts = []
+    for language in preferred_languages:
+        if manual.get(language):
+            track_attempts.append((language, True, manual[language]))
+        if automatic.get(language):
+            track_attempts.append((language, False, automatic[language]))
+
+    errors = []
+    for language, is_manual, tracks in track_attempts:
+        _report(callback, f"Trying YouTube captions ({language})...", 0.06)
+
+        # First use yt-dlp's built-in subtitle downloader.
+        subtitle_options = {
+            **common_options,
+            "writesubtitles": is_manual,
+            "writeautomaticsubtitles": not is_manual,
+            "subtitleslangs": [language],
+            "subtitlesformat": "vtt",
+            "outtmpl": str(download_dir / "youtube_caption.%(ext)s"),
+            "overwrites": True,
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(subtitle_options) as ydl:
+                ydl.download([url])
+        except Exception as error:
+            errors.append(f"{language} yt-dlp: {str(error)[:250]}")
+
+        caption_files = [
+            p for p in download_dir.glob("youtube_caption*")
+            if p.is_file() and p.suffix.lower() == ".vtt"
+        ]
+
+        if caption_files:
+            vtt_text = sorted(caption_files)[0].read_text(
+                encoding="utf-8", errors="replace"
+            )
+            segments = _parse_vtt(vtt_text)
+            if segments:
+                return _save_caption_result(segments, callback)
+
+        # Fallback: fetch the caption URL exposed by YouTube's player metadata.
+        for track in tracks:
+            caption_url = track.get("url")
+            if not caption_url:
+                continue
+            try:
+                request = urllib.request.Request(
+                    caption_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Referer": "https://www.youtube.com/",
+                    },
+                )
+                with urllib.request.urlopen(request, timeout=20) as response:
+                    raw_caption = response.read().decode("utf-8", errors="replace")
+
+                # Some YouTube caption URLs return JSON3 rather than WebVTT.
+                if raw_caption.lstrip().startswith("{"):
+                    data = __import__("json").loads(raw_caption)
+                    caption_lines = []
+                    for event in data.get("events", []):
+                        text = "".join(
+                            item.get("utf8", "")
+                            for item in event.get("segs", [])
+                        ).strip()
+                        if text:
+                            start = float(event.get("tStartMs", 0)) / 1000
+                            duration = float(event.get("dDurationMs", 1000)) / 1000
+                            caption_lines.append(
+                                f"{_srt_time(start).replace(',', '.')} --> "
+                                f"{_srt_time(start + duration).replace(',', '.')}\n{text}"
+                            )
+                    raw_caption = "WEBVTT\n\n" + "\n\n".join(caption_lines)
+
+                segments = _parse_vtt(raw_caption)
+                if segments:
+                    (download_dir / "youtube_caption_direct.vtt").write_text(
+                        raw_caption, encoding="utf-8"
+                    )
+                    return _save_caption_result(segments, callback)
+            except Exception as error:
+                errors.append(f"{language} direct URL: {str(error)[:250]}")
+
+    raise RuntimeError(
+        "YouTube listed caption tracks, but none could be downloaded or parsed. "
+        "This can happen when YouTube blocks caption requests from the cloud server. "
+        + " | ".join(errors[-4:])
     )
-    if language is None:
-        language = next(
-            (lang for lang in languages if lang.lower().startswith("en-")),
-            None
-        )
-    if language is None:
-        language = languages[0]
 
-    has_manual_track = bool(manual.get(language))
-    _report(callback, f"Found YouTube captions ({language}). Fetching transcript...", 0.06)
 
-    subtitle_options = {
-        **common_options,
-        "writesubtitles": has_manual_track,
-        "writeautomaticsubtitles": True,
-        "subtitleslangs": [language],
-        "subtitlesformat": "vtt/best",
-        "outtmpl": str(download_dir / "youtube_caption.%(ext)s"),
-        "overwrites": True,
-    }
-
-    with yt_dlp.YoutubeDL(subtitle_options) as ydl:
-        ydl.download([url])
-
-    caption_files = [
-        p for p in download_dir.glob("youtube_caption*")
-        if p.is_file() and p.suffix.lower() == ".vtt"
-    ]
-
-    if not caption_files:
-        found = [p.name for p in download_dir.glob("youtube_caption*") if p.is_file()]
-        raise RuntimeError(
-            "YouTube reported captions, but yt-dlp did not create a VTT file. "
-            f"Files found: {found}"
-        )
-
-    vtt_file = sorted(caption_files)[0]
-    vtt_text = vtt_file.read_text(encoding="utf-8", errors="replace")
-    segments = _parse_vtt(vtt_text)
-
-    if not segments:
-        preview = vtt_text[:500].replace("\n", " ")
-        raise RuntimeError(
-            "The downloaded VTT file contained no readable caption cues. "
-            f"File: {vtt_file.name}. Preview: {preview}"
-        )
-
+def _save_caption_result(segments, callback):
     words = _caption_words(segments)
     if not words:
         raise RuntimeError("Caption segments were found, but word timings could not be generated.")
