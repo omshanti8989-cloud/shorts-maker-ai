@@ -147,19 +147,29 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def _render_vertical(input_video, output_video, subtitle_file):
+    """
+    Preserve the complete original video frame, including streamer facecam,
+    and create a vertical 9:16 Short with a blurred background.
+    """
     font_folder = os.path.abspath("fonts").replace("\\", "/").replace(":", r"\:")
     subtitle_path = os.path.abspath(subtitle_file).replace("\\", "/").replace(":", r"\:")
-    video_filter = (
-        "scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,"
-        f"ass='{subtitle_path}':fontsdir='{font_folder}'"
+
+    filter_complex = (
+        "[0:v]split=2[background][foreground];"
+        "[background]scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,boxblur=24:12[blurred];"
+        "[foreground]scale=1080:1920:force_original_aspect_ratio=decrease[fit];"
+        "[blurred][fit]overlay=(W-w)/2:(H-h)/2,"
+        f"ass='{subtitle_path}':fontsdir='{font_folder}'[final]"
     )
+
     subprocess.run([
         "ffmpeg", "-y", "-i", str(input_video),
-        "-vf", video_filter,
-        "-map", "0:v:0", "-map", "0:a?",
+        "-filter_complex", filter_complex,
+        "-map", "[final]", "-map", "0:a?",
         "-c:v", "libx264", "-c:a", "aac",
-        "-preset", "fast", str(output_video)
+        "-preset", "fast", "-pix_fmt", "yuv420p",
+        "-shortest", str(output_video)
     ], check=True)
 
 
