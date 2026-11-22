@@ -68,7 +68,7 @@ def get_popular_videos(max_results=10):
         maxResults=max_results
     ).execute()
 
-    videos = []
+        videos = []
 
     for item in response.get("items", []):
 
@@ -78,4 +78,13 @@ def get_popular_videos(max_results=10):
         thumbnails = snippet.get("thumbnails", {})
         thumbnail = thumbnails.get("medium", {}).get("url")
 
-        videos
+        videos.append({
+            "id": item["id"],
+            "title": snippet.get("title", "Untitled"),
+            "channel": snippet.get("channelTitle", "Unknown"),
+            "thumbnail": thumbnail,
+            "views": statistics.get("viewCount", "N/A"),
+            "url": f"https://www.youtube.com/watch?v={item['id']}"
+        })
+
+    return videos
