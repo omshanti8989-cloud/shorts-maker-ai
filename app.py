@@ -23,7 +23,7 @@ DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # --------------------------------------------------
-# API KEY
+# YOUTUBE API KEY
 # --------------------------------------------------
 
 def get_youtube_api_key():
@@ -54,10 +54,11 @@ def get_youtube_api():
 
 
 # --------------------------------------------------
-# YOUTUBE VIDEO DISCOVERY
+# GET POPULAR YOUTUBE VIDEOS
 # --------------------------------------------------
 
 def get_popular_videos(max_results=10):
+
     youtube = get_youtube_api()
 
     response = youtube.videos().list(
@@ -70,12 +71,11 @@ def get_popular_videos(max_results=10):
     videos = []
 
     for item in response.get("items", []):
+
         snippet = item.get("snippet", {})
         statistics = item.get("statistics", {})
 
-        videos.append({
-            "id": item["id"],
-            "title": snippet.get("title", "Untitled"),
-            "channel": snippet.get("channelTitle", "Unknown"),
-            "thumbnail": snippet.get("thumbnails", {})
-                .get("medium",
+        thumbnails = snippet.get("thumbnails", {})
+        thumbnail = thumbnails.get("medium", {}).get("url")
+
+        videos
