@@ -83,7 +83,7 @@ def get_popular_videos(max_results=10):
             "title": snippet.get("title", "Untitled"),
             "channel": snippet.get("channelTitle", "Unknown"),
             "thumbnail": thumbnail,
-            "views": statistics.get("viewCount", "N/A"),
+            "views": statistics.get("viewCount", "0"),
             "url": f"https://www.youtube.com/watch?v={item['id']}"
         })
 
