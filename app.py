@@ -272,6 +272,12 @@ number_of_shorts = st.number_input(
     step=1
 )
 
+st.info(
+    "Fast Mode is enabled for YouTube links: Hindi/English captions are checked "
+    "with short timeouts, and an active livestream's recent chat is used as an "
+    "extra highlight signal. Ended livestreams may not expose live chat."
+)
+
 
 # ---------------------------------
 # GENERATE SHORTS
@@ -328,10 +334,12 @@ if st.button(
 
         else:
 
+            youtube_api_key = st.secrets.get("YOUTUBE_API_KEY")
             results = process_youtube_video(
                 selected_url.strip(),
                 int(number_of_shorts),
-                progress_callback=update_progress
+                progress_callback=update_progress,
+                youtube_api_key=youtube_api_key
             )
 
 
