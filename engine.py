@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import yt_dlp
+from yt_dlp.utils import download_range_func
 from faster_whisper import WhisperModel
 
 
@@ -483,7 +484,7 @@ def process_video(video, number_of_shorts=5, progress_callback=None):
 
 
 def process_youtube_video(url, number_of_shorts=5, progress_callback=None):
-    """Use YouTube captions for analysis, then download source video once and cut clips locally."""
+    """Analyze YouTube captions, then retrieve only the selected video ranges."""
     project_dir = Path(__file__).resolve().parent
     os.chdir(project_dir)
     _prepare_folders()
@@ -512,57 +513,96 @@ def process_youtube_video(url, number_of_shorts=5, progress_callback=None):
         raise RuntimeError("No suitable clips found. Try another video.")
 
     def download_selected_range(start, end, output):
+        """Download only one selected YouTube time range, not the full source."""
         output.parent.mkdir(parents=True, exist_ok=True)
 
-        source_files = [
-            p for p in output.parent.glob("source_video.*")
-            if p.is_file() and p.suffix.lower() in {".mp4", ".mkv", ".webm"}
+        # Each clip gets its own yt-dlp download. web_safari commonly exposes
+        # HLS formats, which currently avoid some GVS PO-token requirements.
+        # If that client is unavailable for a video, retry with yt-dlp defaults.
+        attempts = [
+            ("web_safari", {"youtube": {"player_client": ["web_safari"]}}),
+            ("default", None),
         ]
+        errors = []
 
-        if not source_files:
+        for client_name, extractor_args in attempts:
+            # Remove leftovers from a failed previous attempt for this clip.
+            for stale in output.parent.glob(f"{output.stem}.*"):
+                if stale.is_file():
+                    try:
+                        stale.unlink()
+                    except OSError:
+                        pass
+
             options = {
-                "format": "bestvideo*+bestaudio/best",
+                "format": "best",
+                "download_ranges": download_range_func(None, [(float(start), float(end))]),
+                "force_keyframes_at_cuts": True,
+                "outtmpl": str(output.with_suffix("")) + ".%(ext)s",
+                "merge_output_format": "mp4",
                 "js_runtimes": {"deno": {}},
                 "remote_components": ["ejs:github"],
-                "outtmpl": str(output.parent / "source_video.%(ext)s"),
                 "noplaylist": True,
                 "quiet": True,
                 "no_warnings": True,
+                "overwrites": True,
+                "retries": 2,
+                "fragment_retries": 2,
+                "socket_timeout": 30,
             }
+            if extractor_args:
+                options["extractor_args"] = extractor_args
 
-            with yt_dlp.YoutubeDL(options) as ydl:
-                ydl.download([url])
+            try:
+                _report(
+                    progress_callback,
+                    f"Downloading only {int(end - start)} seconds of selected footage ({client_name} client)...",
+                    0.62,
+                )
+                with yt_dlp.YoutubeDL(options) as ydl:
+                    ydl.download([url])
 
-            source_files = [
-                p for p in output.parent.glob("source_video.*")
-                if p.is_file() and p.suffix.lower() in {".mp4", ".mkv", ".webm"}
-            ]
+                generated = [
+                    p for p in output.parent.glob(f"{output.stem}.*")
+                    if p.is_file() and p.suffix.lower() in {
+                        ".mp4", ".mkv", ".webm", ".mov"
+                    }
+                ]
+                if not generated:
+                    raise RuntimeError("yt-dlp completed but no clip file was created.")
 
-        if not source_files:
-            raise RuntimeError("Source video download failed.")
+                downloaded = generated[0]
+                if downloaded != output:
+                    # Normalize the result to the MP4 filename expected by the renderer.
+                    command = [
+                        "ffmpeg", "-y", "-i", str(downloaded),
+                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                        "-c:a", "aac", "-movflags", "+faststart", str(output)
+                    ]
+                    result = subprocess.run(command, capture_output=True, text=True)
+                    if result.returncode != 0:
+                        raise RuntimeError("FFmpeg could not normalize the selected segment: " + result.stderr[-1200:])
+                    if downloaded.exists():
+                        downloaded.unlink()
 
-        source = source_files[0]
-        command = [
-            "ffmpeg", "-y",
-            "-ss", str(start),
-            "-i", str(source),
-            "-t", str(end - start),
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "23",
-            "-c:a", "aac",
-            "-movflags", "+faststart",
-            str(output)
-        ]
+                if not output.exists() or output.stat().st_size == 0:
+                    raise RuntimeError("The downloaded clip is empty.")
+                return
 
-        result = subprocess.run(command, capture_output=True, text=True)
-        if result.returncode != 0:
+            except Exception as error:
+                errors.append(f"{client_name}: {str(error)[:700]}")
+
+        combined = " | ".join(errors)
+        if "403" in combined or "Forbidden" in combined:
             raise RuntimeError(
-                "FFmpeg clip creation failed: " + result.stderr[-2000:]
+                "YouTube returned HTTP 403 for the selected video segment with both "
+                "the web_safari and default clients. This update avoids downloading "
+                "the entire source video, but it cannot override a YouTube block on "
+                "the Streamlit Cloud server IP. A PO-token provider may help with "
+                "token-related 403s; it will not fix an IP-level block. Details: "
+                + combined
             )
-
-        if not output.exists() or output.stat().st_size == 0:
-            raise RuntimeError("Generated clip is empty.")
+        raise RuntimeError("Could not download the selected YouTube segment. " + combined)
 
     return _finish_clips(
         best_clips,
