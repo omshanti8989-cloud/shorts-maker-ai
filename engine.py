@@ -2,7 +2,9 @@ import os
 import re
 import glob
 import html
+import json
 import subprocess
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,23 +19,29 @@ def _report(callback, message, progress=None):
         callback(message, progress)
 
 
-def _select_clips(segments, number_of_shorts):
+
+def _select_clips(segments, number_of_shorts, chat_signals=None):
+    """Rank 25-60 second transcript windows, optionally boosted by live-chat bursts."""
     candidates = []
     strong_phrases = [
         "you won't believe", "the truth is", "this is why",
         "here's what happened", "nobody talks about",
         "the biggest mistake", "what happens next",
-        "listen carefully", "i was shocked", "the secret to"
+        "listen carefully", "i was shocked", "the secret to",
+        "बहुत बढ़िया", "क्या बात है", "भाई साहब", "मार दिया",
+        "हेडशॉट", "क्लच", "ओपी", "जबरदस्त"
     ]
     strong_words = [
         "secret", "shocking", "mistake", "amazing", "incredible",
         "unbelievable", "dangerous", "truth", "insane", "crazy",
-        "surprising"
+        "surprising", "clutch", "headshot", "knock", "kill", "op",
+        "वाह", "गजब", "भाई", "मार", "जीत", "नॉक"
     ]
     curiosity_words = [
         "why", "how", "what", "never", "actually",
         "imagine", "discover", "finally", "because"
     ]
+    chat_signals = chat_signals or []
 
     for segment in segments:
         start = float(segment.start)
@@ -49,11 +57,11 @@ def _select_clips(segments, number_of_shorts):
         text = " ".join(s.text for s in selected).lower()
         score = sum(3 for phrase in strong_phrases if phrase in text)
         score += sum(
-            len(re.findall(r"\b" + re.escape(word) + r"\b", text)) * 2
+            len(re.findall(r"(?<!\w)" + re.escape(word) + r"(?!\w)", text)) * 2
             for word in strong_words
         )
         score += sum(
-            len(re.findall(r"\b" + re.escape(word) + r"\b", text))
+            len(re.findall(r"(?<!\w)" + re.escape(word) + r"(?!\w)", text))
             for word in curiosity_words
         )
         score += min(text.count("?"), 3) * 2
@@ -61,6 +69,12 @@ def _select_clips(segments, number_of_shorts):
         word_count = len(re.findall(r"\b\w+\b", text))
         if 80 <= word_count <= 180:
             score += 3
+
+        # A chat burst near the transcript window is a useful secondary signal.
+        for signal_start, signal_score in chat_signals:
+            if start - 12 <= signal_start <= actual_end + 12:
+                score += min(int(signal_score), 12)
+
         candidates.append((score, start, actual_end, text))
 
     candidates.sort(reverse=True, key=lambda item: item[0])
@@ -71,7 +85,6 @@ def _select_clips(segments, number_of_shorts):
         if len(best) >= int(number_of_shorts):
             break
     return best
-
 
 def _ass_time(seconds):
     total = round(seconds * 100)
@@ -282,13 +295,15 @@ def _caption_words(segments):
     return words
 
 
-def _fetch_youtube_captions(url, callback):
-    """Retrieve YouTube captions, trying yt-dlp subtitle download and direct caption URLs."""
-    _report(callback, "Checking YouTube captions...", 0.03)
 
+def _fetch_youtube_captions(url, callback):
+    """
+    Fast caption path: inspect metadata once, prefer Hindi/Hinglish tracks,
+    and fetch only one usable track with a short network timeout.
+    """
+    _report(callback, "Fast Mode: checking Hindi/English captions...", 0.03)
     download_dir = Path("downloads")
     download_dir.mkdir(parents=True, exist_ok=True)
-
     for old_file in download_dir.glob("youtube_caption*"):
         if old_file.is_file():
             old_file.unlink()
@@ -298,75 +313,49 @@ def _fetch_youtube_captions(url, callback):
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
+        "socket_timeout": 12,
+        "retries": 0,
+        "extractor_retries": 0,
         "js_runtimes": {"deno": {}},
         "remote_components": ["ejs:github"],
     }
-
     with yt_dlp.YoutubeDL(common_options) as ydl:
         info = ydl.extract_info(url, download=False)
 
     manual = info.get("subtitles") or {}
     automatic = info.get("automatic_captions") or {}
-
-    # Prefer English, including YouTube's newer en-orig/en-US variants.
-    all_languages = list(dict.fromkeys(list(manual.keys()) + list(automatic.keys())))
+    all_languages = list(dict.fromkeys(list(manual) + list(automatic)))
     if not all_languages:
         return None
 
     def language_rank(code):
         code = code.lower()
-        if code in ("en", "en-us", "en-gb", "en-orig"):
+        if code in ("hi", "hi-in", "hi-orig"):
             return 0
-        if code.startswith("en-"):
+        if code.startswith("hi-"):
             return 1
-        return 2
+        if code in ("en", "en-us", "en-gb", "en-orig"):
+            return 2
+        if code.startswith("en-"):
+            return 3
+        return 9
 
     all_languages.sort(key=language_rank)
-    preferred_languages = all_languages
+    preferred = [code for code in all_languages if language_rank(code) < 9][:2]
+    if not preferred:
+        preferred = all_languages[:1]
 
-    # Try manual captions first, then automatic captions for each matching language.
-    track_attempts = []
-    for language in preferred_languages:
+    # Prefer manual Hindi, then automatic Hindi, then English.
+    attempts = []
+    for language in preferred:
         if manual.get(language):
-            track_attempts.append((language, True, manual[language]))
+            attempts.append((language, manual[language]))
         if automatic.get(language):
-            track_attempts.append((language, False, automatic[language]))
+            attempts.append((language, automatic[language]))
 
     errors = []
-    for language, is_manual, tracks in track_attempts:
-        _report(callback, f"Trying YouTube captions ({language})...", 0.06)
-
-        # First use yt-dlp's built-in subtitle downloader.
-        subtitle_options = {
-            **common_options,
-            "writesubtitles": is_manual,
-            "writeautomaticsubtitles": not is_manual,
-            "subtitleslangs": [language],
-            "subtitlesformat": "vtt",
-            "outtmpl": str(download_dir / "youtube_caption.%(ext)s"),
-            "overwrites": True,
-        }
-
-        try:
-            with yt_dlp.YoutubeDL(subtitle_options) as ydl:
-                ydl.download([url])
-        except Exception as error:
-            errors.append(f"{language} yt-dlp: {str(error)[:250]}")
-
-        caption_files = [
-            p for p in download_dir.glob("youtube_caption*")
-            if p.is_file() and p.suffix.lower() == ".vtt"
-        ]
-
-        if caption_files:
-            vtt_text = sorted(caption_files)[0].read_text(
-                encoding="utf-8", errors="replace"
-            )
-            segments = _parse_vtt(vtt_text)
-            if segments:
-                return _save_caption_result(segments, callback)
-
-        # Fallback: fetch the caption URL exposed by YouTube's player metadata.
+    for language, tracks in attempts[:3]:
+        _report(callback, f"Fast Mode: fetching {language} captions...", 0.08)
         for track in tracks:
             caption_url = track.get("url")
             if not caption_url:
@@ -379,12 +368,13 @@ def _fetch_youtube_captions(url, callback):
                         "Referer": "https://www.youtube.com/",
                     },
                 )
-                with urllib.request.urlopen(request, timeout=20) as response:
-                    raw_caption = response.read().decode("utf-8", errors="replace")
+                with urllib.request.urlopen(request, timeout=8) as response:
+                    raw_caption = response.read(8 * 1024 * 1024).decode(
+                        "utf-8", errors="replace"
+                    )
 
-                # Some YouTube caption URLs return JSON3 rather than WebVTT.
                 if raw_caption.lstrip().startswith("{"):
-                    data = __import__("json").loads(raw_caption)
+                    data = json.loads(raw_caption)
                     caption_lines = []
                     for event in data.get("events", []):
                         text = "".join(
@@ -392,29 +382,31 @@ def _fetch_youtube_captions(url, callback):
                             for item in event.get("segs", [])
                         ).strip()
                         if text:
-                            start = float(event.get("tStartMs", 0)) / 1000
-                            duration = float(event.get("dDurationMs", 1000)) / 1000
+                            cue_start = float(event.get("tStartMs", 0)) / 1000
+                            cue_duration = float(event.get("dDurationMs", 1000)) / 1000
                             caption_lines.append(
-                                f"{_srt_time(start).replace(',', '.')} --> "
-                                f"{_srt_time(start + duration).replace(',', '.')}\n{text}"
+                                f"{_srt_time(cue_start).replace(',', '.')} --> "
+                                f"{_srt_time(cue_start + cue_duration).replace(',', '.')}\n{text}"
                             )
                     raw_caption = "WEBVTT\n\n" + "\n\n".join(caption_lines)
 
                 segments = _parse_vtt(raw_caption)
                 if segments:
-                    (download_dir / "youtube_caption_direct.vtt").write_text(
+                    (download_dir / "youtube_caption_fast.vtt").write_text(
                         raw_caption, encoding="utf-8"
                     )
+                    _report(callback, f"Loaded {language} captions.", 0.18)
                     return _save_caption_result(segments, callback)
             except Exception as error:
-                errors.append(f"{language} direct URL: {str(error)[:250]}")
+                errors.append(f"{language}: {str(error)[:180]}")
 
-    raise RuntimeError(
-        "YouTube listed caption tracks, but none could be downloaded or parsed. "
-        "This can happen when YouTube blocks caption requests from the cloud server. "
-        + " | ".join(errors[-4:])
-    )
-
+    if errors:
+        _report(
+            callback,
+            "Fast caption retrieval did not work; checking whether another source is available...",
+            0.12,
+        )
+    return None
 
 def _save_caption_result(segments, callback):
     words = _caption_words(segments)
@@ -483,7 +475,105 @@ def process_video(video, number_of_shorts=5, progress_callback=None):
     return _finish_clips(best_clips, words, local_clip, number_of_shorts, progress_callback)
 
 
-def process_youtube_video(url, number_of_shorts=5, progress_callback=None):
+
+def _youtube_api_get(endpoint, params, timeout=8):
+    query = urllib.parse.urlencode(params)
+    request = urllib.request.Request(
+        f"https://www.googleapis.com/youtube/v3/{endpoint}?{query}",
+        headers={"User-Agent": "ShortsMakerAI/2.0"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8", errors="replace"))
+
+
+def _fetch_live_chat_signals(url, api_key, callback):
+    """
+    Read one recent batch from an active livestream chat.
+    This API cannot provide archived chat for an ended stream.
+    """
+    if not api_key:
+        _report(callback, "Live-chat scan skipped: YOUTUBE_API_KEY is not configured.", 0.10)
+        return []
+
+    match = re.search(r"(?:v=|youtu\.be/|live/)([A-Za-z0-9_-]{11})", url)
+    if not match:
+        return []
+    video_id = match.group(1)
+    try:
+        details = _youtube_api_get(
+            "videos",
+            {
+                "part": "liveStreamingDetails",
+                "id": video_id,
+                "key": api_key,
+            },
+        )
+        items = details.get("items", [])
+        if not items:
+            return []
+        live = items[0].get("liveStreamingDetails", {})
+        chat_id = live.get("activeLiveChatId")
+        actual_start = live.get("actualStartTime")
+        if not chat_id or not actual_start:
+            _report(callback, "No active live chat found; using captions only.", 0.12)
+            return []
+
+        from datetime import datetime
+        start_dt = datetime.fromisoformat(actual_start.replace("Z", "+00:00"))
+        chat = _youtube_api_get(
+            "liveChat/messages",
+            {
+                "part": "snippet",
+                "liveChatId": chat_id,
+                "maxResults": 200,
+                "key": api_key,
+            },
+        )
+        buckets = {}
+        reaction_terms = (
+            "op", "clutch", "headshot", "1v", "knock", "kill",
+            "वाह", "गजब", "जबरदस्त", "भाई", "मार दिया", "क्लच",
+            "हेडशॉट", "ओपी", "🔥", "😂", "😱", "💀"
+        )
+        for item in chat.get("items", []):
+            snippet = item.get("snippet", {})
+            published = snippet.get("publishedAt")
+            message = snippet.get("displayMessage", "").lower()
+            if not published or not message:
+                continue
+            timestamp = datetime.fromisoformat(published.replace("Z", "+00:00"))
+            elapsed = max(0, int((timestamp - start_dt).total_seconds()))
+            bucket = (elapsed // 15) * 15
+            score = 1
+            score += sum(2 for term in reaction_terms if term in message)
+            buckets[bucket] = buckets.get(bucket, 0) + score
+
+        signals = [(float(bucket), score) for bucket, score in buckets.items() if score >= 3]
+        _report(
+            callback,
+            f"Scanned {len(chat.get('items', []))} recent live-chat messages.",
+            0.16,
+        )
+        return signals
+    except Exception as error:
+        _report(callback, f"Live-chat scan unavailable; continuing with captions: {str(error)[:160]}", 0.12)
+        return []
+
+
+def _chat_only_clip_candidates(chat_signals, number_of_shorts, duration=40):
+    """Build candidate windows from active-live-chat reaction bursts when captions are absent."""
+    ranked = sorted(chat_signals, key=lambda item: item[1], reverse=True)
+    chosen = []
+    for timestamp, score in ranked:
+        start = max(0.0, float(timestamp) - 10.0)
+        end = start + float(duration)
+        if all(end <= old_start or start >= old_end for old_start, old_end in chosen):
+            chosen.append((start, end))
+        if len(chosen) >= int(number_of_shorts):
+            break
+    return chosen
+
+def process_youtube_video(url, number_of_shorts=5, progress_callback=None, youtube_api_key=None):
     """Analyze YouTube captions, then retrieve only the selected video ranges."""
     project_dir = Path(__file__).resolve().parent
     os.chdir(project_dir)
@@ -493,22 +583,40 @@ def process_youtube_video(url, number_of_shorts=5, progress_callback=None):
     if not url:
         raise ValueError("Please enter a YouTube URL.")
 
+    chat_signals = _fetch_live_chat_signals(url, youtube_api_key, progress_callback)
+
+    caption_error = None
     try:
         caption_result = _fetch_youtube_captions(url, progress_callback)
     except Exception as error:
-        raise RuntimeError(
-            f"YouTube caption retrieval failed: {error}. No audio was downloaded."
-        ) from error
+        caption_result = None
+        caption_error = error
 
-    if not caption_result:
+    if caption_result:
+        segments, words = caption_result
+        _report(
+            callback=progress_callback,
+            message="Captions loaded! Ranking Hindi/English highlights with chat signals...",
+            progress=0.58,
+        )
+        best_clips = _select_clips(
+            segments, number_of_shorts, chat_signals=chat_signals
+        )
+    elif chat_signals:
+        words = []
+        _report(
+            progress_callback,
+            "Captions unavailable. Creating candidate timestamps from active live-chat reactions.",
+            0.58,
+        )
+        best_clips = _chat_only_clip_candidates(chat_signals, number_of_shorts)
+    else:
+        detail = f" Caption error: {caption_error}" if caption_error else ""
         raise RuntimeError(
-            "No usable YouTube captions were found. Full audio downloading is disabled."
+            "No usable YouTube captions or active live-chat signals were available. "
+            "Full video/audio downloading remains disabled." + detail
         )
 
-    segments, words = caption_result
-    _report(callback=progress_callback, message="Captions loaded! Finding the strongest moments...", progress=0.58)
-
-    best_clips = _select_clips(segments, number_of_shorts)
     if not best_clips:
         raise RuntimeError("No suitable clips found. Try another video.")
 
