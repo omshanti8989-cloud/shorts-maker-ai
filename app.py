@@ -414,8 +414,10 @@ if not user_email:
 can_generate, reason, user_info = database.can_generate_video(user_email)
 
 if not can_generate:
+    pro_price = int(get_secret("PRO_PRICE_INR", getattr(payments, "DEFAULT_PRICE_INR", 99)))
+
     # PAYWALL / SUBSCRIPTION CARD
-    st.markdown("""
+    st.markdown(f"""
     <div class="pricing-card">
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
             <div>
@@ -423,7 +425,7 @@ if not can_generate:
                 <h2 style="margin:5px 0 0 0; color:white;">Upgrade to Shorts Maker Pro</h2>
             </div>
             <div>
-                <span class="pricing-price">₹499</span>
+                <span class="pricing-price">₹{pro_price}</span>
                 <span style="color:#94A3B8; font-size:1.1rem; font-weight:600;">/ month</span>
             </div>
         </div>
@@ -434,8 +436,9 @@ if not can_generate:
             <div>⚡ <strong>Unlimited</strong> Short Creations</div>
             <div>🎯 <strong>Smart Face Tracking</strong> 9:16 Crop</div>
             <div>👥 <strong>Dual-Speaker</strong> Split Screen</div>
+            <div>🇮🇳 <strong>Hindi & Hinglish</strong> AI Subtitles</div>
             <div>🔥 <strong>Hormozi & MrBeast</strong> Captions</div>
-            <div>✨ <strong>Animated Emojis</strong> & Word Highlights</div>
+            <div>✨ <strong>Animated Emojis</strong> & Highlights</div>
             <div>🚀 <strong>Priority Render Queue</strong> & 1080p HD</div>
         </div>
     </div>
@@ -443,8 +446,8 @@ if not can_generate:
 
     pay_col1, pay_col2 = st.columns([2, 1])
     with pay_col1:
-        if st.button("⚡ Subscribe to Pro (₹499 / month)", type="primary", use_container_width=True):
-            res = payments.create_razorpay_payment_link(user_email, amount_inr=499)
+        if st.button(f"⚡ Subscribe to Pro (₹{pro_price} / month)", type="primary", use_container_width=True):
+            res = payments.create_razorpay_payment_link(user_email, amount_inr=pro_price)
             if res.get("payment_url"):
                 st.markdown(f"👉 **[Click Here to Complete Razorpay Payment]({res['payment_url']})**")
             else:

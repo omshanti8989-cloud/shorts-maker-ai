@@ -4,18 +4,21 @@ import base64
 import urllib.request
 import urllib.error
 
-# Default plan pricing
+# Default plan pricing (Affordable Indian Creator Plan)
+DEFAULT_PRICE_INR = int(os.environ.get("PRO_PRICE_INR", 99))
+
 SUBSCRIPTION_PLANS = {
     "pro_monthly": {
         "name": "Shorts Maker Pro",
-        "price_inr": 499,
-        "price_usd": 9.99,
+        "price_inr": DEFAULT_PRICE_INR,
+        "price_usd": 1.99,
         "period": "monthly",
         "features": [
             "Unlimited Short & Reel Generations",
             "Smart Face Tracking (Full 9:16 Auto-Crop)",
             "Dual-Speaker Split Screen Layout",
             "All Subtitle Presets (Hormozi, MrBeast, Neon)",
+            "Hindi (हिन्दी) & Hinglish Subtitle Generator",
             "Dynamic Animated Emojis & Word Bounces",
             "Full 1080x1920 HD Export Quality",
             "No Watermarks & Priority Processing"
@@ -24,7 +27,7 @@ SUBSCRIPTION_PLANS = {
 }
 
 
-def create_razorpay_payment_link(email, key_id=None, key_secret=None, amount_inr=499):
+def create_razorpay_payment_link(email, key_id=None, key_secret=None, amount_inr=DEFAULT_PRICE_INR):
     """
     Creates a Razorpay Payment Link for Indian creators supporting UPI, GPay, PhonePe, Paytm, and Cards.
     Falls back to a standard checkout representation if live keys are not provided.
