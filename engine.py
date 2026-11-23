@@ -13,81 +13,38 @@ import yt_dlp
 from yt_dlp.utils import download_range_func
 from faster_whisper import WhisperModel
 
+from ai_highlight import detect_viral_highlights
+from cropper import SmartCropper
+from caption_maker import create_animated_captions
+from translator import translate_words_to_language
+
+
+class ShortResult(str):
+    """String subclass that holds rich viral clip metadata for full backward compatibility."""
+    def __new__(cls, path, **meta):
+        instance = super().__new__(cls, path)
+        instance.path = str(path)
+        instance.meta = meta
+        for k, v in meta.items():
+            setattr(instance, k, v)
+        return instance
+
+    def __getitem__(self, item):
+        if isinstance(item, str):
+            return self.meta.get(item)
+        return super().__getitem__(item)
+
+    def get(self, item, default=None):
+        return self.meta.get(item, default)
+
 
 def _report(callback, message, progress=None):
     if callback:
         callback(message, progress)
 
 
-
-def _select_clips(segments, number_of_shorts, chat_signals=None):
-    """Rank 25-60 second transcript windows, optionally boosted by live-chat bursts."""
-    candidates = []
-    strong_phrases = [
-        "you won't believe", "the truth is", "this is why",
-        "here's what happened", "nobody talks about",
-        "the biggest mistake", "what happens next",
-        "listen carefully", "i was shocked", "the secret to",
-        "बहुत बढ़िया", "क्या बात है", "भाई साहब", "मार दिया",
-        "हेडशॉट", "क्लच", "ओपी", "जबरदस्त"
-    ]
-    strong_words = [
-        "secret", "shocking", "mistake", "amazing", "incredible",
-        "unbelievable", "dangerous", "truth", "insane", "crazy",
-        "surprising", "clutch", "headshot", "knock", "kill", "op",
-        "वाह", "गजब", "भाई", "मार", "जीत", "नॉक"
-    ]
-    curiosity_words = [
-        "why", "how", "what", "never", "actually",
-        "imagine", "discover", "finally", "because"
-    ]
-    chat_signals = chat_signals or []
-
-    for segment in segments:
-        start = float(segment.start)
-        end_limit = start + 45
-        selected = [s for s in segments if s.start >= start and s.end <= end_limit]
-        if not selected:
-            continue
-        actual_end = float(selected[-1].end)
-        duration = actual_end - start
-        if duration < 25 or duration > 60:
-            continue
-
-        text = " ".join(s.text for s in selected).lower()
-        score = sum(3 for phrase in strong_phrases if phrase in text)
-        score += sum(
-            len(re.findall(r"(?<!\w)" + re.escape(word) + r"(?!\w)", text)) * 2
-            for word in strong_words
-        )
-        score += sum(
-            len(re.findall(r"(?<!\w)" + re.escape(word) + r"(?!\w)", text))
-            for word in curiosity_words
-        )
-        score += min(text.count("?"), 3) * 2
-        score += min(text.count("!"), 3) * 2
-        word_count = len(re.findall(r"\b\w+\b", text))
-        if 80 <= word_count <= 180:
-            score += 3
-
-        # A chat burst near the transcript window is a useful secondary signal.
-        for signal_start, signal_score in chat_signals:
-            if start - 12 <= signal_start <= actual_end + 12:
-                score += min(int(signal_score), 12)
-
-        candidates.append((score, start, actual_end, text))
-
-    candidates.sort(reverse=True, key=lambda item: item[0])
-    best = []
-    for score, start, end, text in candidates:
-        if all(end <= old_start or start >= old_end for old_start, old_end in best):
-            best.append((start, end))
-        if len(best) >= int(number_of_shorts):
-            break
-    return best
-
 def _ass_time(seconds):
-    total = round(seconds * 100)
+    total = round(max(0.0, float(seconds)) * 100)
     hours = total // 360000
     minutes = (total % 360000) // 6000
     secs = (total % 6000) // 100
@@ -96,7 +53,7 @@ def _ass_time(seconds):
 
 
 def _srt_time(seconds):
-    milliseconds = round(seconds * 1000)
+    milliseconds = round(max(0.0, float(seconds)) * 1000)
     hours = milliseconds // 3600000
     minutes = (milliseconds % 3600000) // 60000
     seconds_part = (milliseconds % 60000) // 1000
@@ -104,49 +61,15 @@ def _srt_time(seconds):
     return f"{hours:02}:{minutes:02}:{seconds_part:02},{ms:03}"
 
 
-def _make_captions(words, index):
-    header = """[Script Info]
-Title: Shorts Maker Animated Captions
-ScriptType: v4.00+
-PlayResX: 1080
-PlayResY: 1920
-WrapStyle: 2
-ScaledBorderAndShadow: yes
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Pop,Noto Sans Devanagari,81,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,1,4,2,5,70,70,0,1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
-    events = []
-    group_size = 4
-    for i in range(0, len(words), group_size):
-        group = words[i:i + group_size]
-        for active_index, active_word in enumerate(group):
-            start, end = active_word["start"], active_word["end"]
-            if end <= start:
-                continue
-            parts = []
-            for j, item in enumerate(group):
-                safe_word = re.sub(r"[{}\\]", "", item["text"])
-                if j == active_index:
-                    parts.append(
-                        r"{\c&H0000FFFF&\fscx115\fscy115"
-                        r"\t(0,120,\fscx100\fscy100)}"
-                        + safe_word + r"{\c&H00FFFFFF&}"
-                    )
-                else:
-                    parts.append(safe_word)
-            caption = " ".join(parts)
-            events.append(
-                f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},"
-                f"Pop,,0,0,0,,{{\\an5\\pos(540,960)}}{caption}"
-            )
-
+def _make_captions(words, index, style_name="hormozi", highlight_color="yellow", enable_emojis=True):
     ass_path = Path(f"subtitles/clip_{index}.ass")
-    ass_path.write_text(header + "\n".join(events), encoding="utf-8-sig")
+    create_animated_captions(
+        words,
+        str(ass_path),
+        style_name=style_name,
+        highlight_color=highlight_color,
+        enable_emojis=enable_emojis
+    )
 
     srt_lines = []
     for number, word in enumerate(words, 1):
@@ -160,31 +83,53 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return str(ass_path)
 
 
-def _render_vertical(input_video, output_video, subtitle_file):
+def _render_vertical(input_video, output_video, subtitle_file, layout="smart_crop"):
     """
-    Preserve the complete original video frame, including streamer facecam,
-    and create a vertical 9:16 Short with a blurred background.
+    Renders 9:16 vertical short using SmartCropper with face tracking,
+    blurred ambient background, or split screen layout.
     """
+    cropper = SmartCropper()
     font_folder = os.path.abspath("fonts").replace("\\", "/").replace(":", r"\:")
     subtitle_path = os.path.abspath(subtitle_file).replace("\\", "/").replace(":", r"\:")
 
-    filter_complex = (
-        "[0:v]split=2[background][foreground];"
-        "[background]scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,boxblur=24:12[blurred];"
-        "[foreground]scale=1080:1920:force_original_aspect_ratio=decrease[fit];"
-        "[blurred][fit]overlay=(W-w)/2:(H-h)/2,"
-        f"ass='{subtitle_path}':fontsdir='{font_folder}'[final]"
-    )
+    try:
+        video_info, primary_x, dual_speakers = cropper.analyze_video_faces(input_video)
+        filter_complex, map_out = cropper.get_crop_filter(
+            video_info,
+            primary_x=primary_x,
+            layout=layout,
+            dual_speakers=dual_speakers,
+            subtitle_path=subtitle_path,
+            fonts_dir="fonts"
+        )
 
-    subprocess.run([
-        "ffmpeg", "-y", "-i", str(input_video),
-        "-filter_complex", filter_complex,
-        "-map", "[final]", "-map", "0:a?",
-        "-c:v", "libx264", "-c:a", "aac",
-        "-preset", "fast", "-pix_fmt", "yuv420p",
-        "-shortest", str(output_video)
-    ], check=True)
+        subprocess.run([
+            "ffmpeg", "-y", "-i", str(input_video),
+            "-filter_complex", filter_complex,
+            "-map", map_out, "-map", "0:a?",
+            "-c:v", "libx264", "-c:a", "aac",
+            "-preset", "fast", "-pix_fmt", "yuv420p",
+            "-shortest", str(output_video)
+        ], check=True)
+
+    except Exception as e:
+        print(f"Smart crop failed ({e}), falling back to blurred background...")
+        fallback_filter = (
+            "[0:v]split=2[bg][fg];"
+            "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
+            "crop=1080:1920,boxblur=24:12[blurred];"
+            "[fg]scale=1080:1920:force_original_aspect_ratio=decrease[fit];"
+            f"[blurred][fit]overlay=(W-w)/2:(H-h)/2,"
+            f"ass='{subtitle_path}':fontsdir='{font_folder}'[final]"
+        )
+        subprocess.run([
+            "ffmpeg", "-y", "-i", str(input_video),
+            "-filter_complex", fallback_filter,
+            "-map", "[final]", "-map", "0:a?",
+            "-c:v", "libx264", "-c:a", "aac",
+            "-preset", "fast", "-pix_fmt", "yuv420p",
+            "-shortest", str(output_video)
+        ], check=True)
 
 
 def _prepare_folders():
@@ -195,16 +140,19 @@ def _prepare_folders():
         "subtitles/clip_*.ass", "subtitles/clip_*.srt"
     ]:
         for old_file in glob.glob(pattern):
-            os.remove(old_file)
+            try:
+                os.remove(old_file)
+            except OSError:
+                pass
 
 
 def _transcribe(audio_or_video, callback):
-    _report(callback, "Loading Whisper Tiny speech-recognition model...", 0.03)
+    _report(callback, "Loading Whisper speech recognition model...", 0.03)
     model = WhisperModel(
         "tiny", device="cpu", compute_type="int8",
         cpu_threads=2, num_workers=1
     )
-    _report(callback, "Transcribing the complete audio. This may take several minutes...", 0.08)
+    _report(callback, "Transcribing video audio. This may take a few moments...", 0.08)
     segments, info = model.transcribe(
         str(audio_or_video), word_timestamps=True, beam_size=1,
         vad_filter=True, condition_on_previous_text=True
@@ -232,7 +180,7 @@ def _transcribe(audio_or_video, callback):
 
 
 def _parse_vtt(vtt_text):
-    """Convert WebVTT caption cues into timestamped transcript segments."""
+    """Convert WebVTT caption cues into strictly sequential, non-overlapping transcript segments."""
     segments = []
     lines = vtt_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     timestamp_pattern = re.compile(
@@ -266,13 +214,31 @@ def _parse_vtt(vtt_text):
         text = html.unescape(text).replace("&lrm;", "").replace("&rlm;", "")
         text = re.sub(r"\s+", " ", text).strip()
         if text and end > start:
-            if segments and text == segments[-1].text:
-                segments[-1].end = max(segments[-1].end, end)
-            else:
-                segments.append(SimpleNamespace(start=start, end=end, text=text))
+            segments.append(SimpleNamespace(start=start, end=end, text=text))
         i += 1
 
-    return segments
+    # Clean and resolve overlapping cues (common in YouTube rolling WebVTT captions)
+    segments.sort(key=lambda s: (s.start, s.end))
+    cleaned = []
+    for s in segments:
+        text = s.text.strip()
+        if not text or s.end <= s.start:
+            continue
+        if cleaned:
+            prev = cleaned[-1]
+            if s.start < prev.end:
+                # If nearly identical start time (<=0.25s), merge lines to avoid collision
+                if s.start <= prev.start + 0.25:
+                    if text not in prev.text:
+                        prev.text = f"{prev.text} {text}"
+                    prev.end = max(prev.end, s.end)
+                    continue
+                else:
+                    # Previous cue finishes right when new cue begins
+                    prev.end = s.start
+        cleaned.append(SimpleNamespace(start=s.start, end=s.end, text=text))
+
+    return cleaned
 
 
 def _caption_words(segments):
@@ -282,31 +248,30 @@ def _caption_words(segments):
         cue_words = segment.text.split()
         if not cue_words:
             continue
-        duration = max(0.15, float(segment.end) - float(segment.start))
+        duration = max(0.2, float(segment.end) - float(segment.start))
         step = duration / len(cue_words)
         for index, word in enumerate(cue_words):
             start = float(segment.start) + index * step
             end = float(segment.start) + (index + 1) * step
             words.append({
                 "start": start,
-                "end": max(start + 0.08, end),
+                "end": end,
                 "text": word
             })
     return words
 
 
-
 def _fetch_youtube_captions(url, callback):
-    """
-    Fast caption path: inspect metadata once, prefer Hindi/Hinglish tracks,
-    and fetch only one usable track with a short network timeout.
-    """
-    _report(callback, "Fast Mode: checking Hindi/English captions...", 0.03)
+    """Fast caption path: inspect metadata and fetch WebVTT track directly."""
+    _report(callback, "Fast Mode: checking for existing YouTube captions...", 0.03)
     download_dir = Path("downloads")
     download_dir.mkdir(parents=True, exist_ok=True)
     for old_file in download_dir.glob("youtube_caption*"):
         if old_file.is_file():
-            old_file.unlink()
+            try:
+                old_file.unlink()
+            except OSError:
+                pass
 
     common_options = {
         "skip_download": True,
@@ -345,7 +310,6 @@ def _fetch_youtube_captions(url, callback):
     if not preferred:
         preferred = all_languages[:1]
 
-    # Prefer manual Hindi, then automatic Hindi, then English.
     attempts = []
     for language in preferred:
         if manual.get(language):
@@ -395,18 +359,13 @@ def _fetch_youtube_captions(url, callback):
                     (download_dir / "youtube_caption_fast.vtt").write_text(
                         raw_caption, encoding="utf-8"
                     )
-                    _report(callback, f"Loaded {language} captions.", 0.18)
+                    _report(callback, f"Loaded {language} captions successfully.", 0.18)
                     return _save_caption_result(segments, callback)
             except Exception as error:
                 errors.append(f"{language}: {str(error)[:180]}")
 
-    if errors:
-        _report(
-            callback,
-            "Fast caption retrieval did not work; checking whether another source is available...",
-            0.12,
-        )
     return None
+
 
 def _save_caption_result(segments, callback):
     words = _caption_words(segments)
@@ -421,11 +380,36 @@ def _save_caption_result(segments, callback):
     return segments, words
 
 
-def _finish_clips(best_clips, all_words, get_clip, number_of_shorts, callback):
+def _finish_clips(
+    best_clips,
+    all_words,
+    get_clip,
+    number_of_shorts,
+    callback,
+    layout="smart_crop",
+    caption_style="hormozi",
+    highlight_color="yellow",
+    enable_emojis=True,
+    subtitle_language="original",
+    gemini_api_key=None
+):
     total = len(best_clips)
     finished = []
-    for i, (start, end) in enumerate(best_clips, 1):
-        _report(callback, f"Getting selected video segment {i} of {total}...", 0.62 + (i - 1) / total * 0.12)
+    for i, clip in enumerate(best_clips, 1):
+        if isinstance(clip, dict):
+            start, end = clip["start"], clip["end"]
+            title = clip.get("title", f"Short {i}")
+            viral_score = clip.get("viral_score", 85)
+            hook = clip.get("hook", "")
+            reason = clip.get("reason", "")
+        else:
+            start, end = clip[0], clip[1]
+            title = f"Viral Short {i}"
+            viral_score = 80
+            hook = ""
+            reason = "Selected moment"
+
+        _report(callback, f"Processing selected viral segment {i} of {total}: '{title}'...", 0.60 + (i - 1) / total * 0.15)
         clip_path = Path(f"clips/clip_{i}.mp4")
         get_clip(start, end, clip_path)
 
@@ -438,18 +422,56 @@ def _finish_clips(best_clips, all_words, get_clip, number_of_shorts, callback):
             for word in all_words
             if word["start"] >= start and word["end"] <= end
         ]
-        subtitle_path = _make_captions(clip_words, i)
 
-        _report(callback, f"Rendering vertical Short {i} of {total}...", 0.78 + (i - 1) / total * 0.20)
+        # Handle Subtitle Translation (Hindi / Hinglish / English)
+        if subtitle_language and subtitle_language != "original":
+            lang_label = "Hindi (हिन्दी)" if subtitle_language == "hi" else ("Hinglish" if subtitle_language == "hinglish" else subtitle_language)
+            _report(callback, f"Generating {lang_label} subtitles with AI...", 0.68 + (i - 1) / total * 0.08)
+            clip_words = translate_words_to_language(
+                clip_words,
+                target_language=subtitle_language,
+                api_key=gemini_api_key
+            )
+
+        subtitle_path = _make_captions(
+            clip_words,
+            i,
+            style_name=caption_style,
+            highlight_color=highlight_color,
+            enable_emojis=enable_emojis
+        )
+
+        _report(callback, f"Rendering 9:16 Short {i} of {total} ({layout} layout)...", 0.75 + (i - 1) / total * 0.22)
         output_path = Path(f"clips/vertical_clip_{i}.mp4")
-        _render_vertical(clip_path, output_path, subtitle_path)
-        finished.append(str(output_path.resolve()))
+        _render_vertical(clip_path, output_path, subtitle_path, layout=layout)
 
-    _report(callback, "All Shorts have been created!", 1.0)
+        result_obj = ShortResult(
+            str(output_path.resolve()),
+            title=title,
+            viral_score=viral_score,
+            hook=hook,
+            reason=reason,
+            start=start,
+            end=end,
+            duration=round(end - start, 1)
+        )
+        finished.append(result_obj)
+
+    _report(callback, "All Shorts have been created successfully!", 1.0)
     return finished
 
 
-def process_video(video, number_of_shorts=5, progress_callback=None):
+def process_video(
+    video,
+    number_of_shorts=5,
+    progress_callback=None,
+    gemini_api_key=None,
+    layout="smart_crop",
+    caption_style="hormozi",
+    highlight_color="yellow",
+    enable_emojis=True,
+    subtitle_language="original"
+):
     """Process an uploaded local video file into vertical Shorts."""
     project_dir = Path(__file__).resolve().parent
     os.chdir(project_dir)
@@ -460,10 +482,15 @@ def process_video(video, number_of_shorts=5, progress_callback=None):
         raise FileNotFoundError(f"Video file not found: {video}")
 
     segments, words = _transcribe(video, progress_callback)
-    _report(progress_callback, "Finding potential highlights...", 0.58)
-    best_clips = _select_clips(segments, number_of_shorts)
+    _report(progress_callback, "Detecting viral highlights with AI...", 0.58)
+
+    best_clips = detect_viral_highlights(
+        segments,
+        number_of_shorts=number_of_shorts,
+        api_key=gemini_api_key
+    )
     if not best_clips:
-        raise RuntimeError("No suitable 25–60 second clips were found. Try a longer video with more speech.")
+        raise RuntimeError("No suitable 25–60 second clips were found. Try a video with more spoken dialogue.")
 
     def local_clip(start, end, output):
         subprocess.run([
@@ -472,8 +499,19 @@ def process_video(video, number_of_shorts=5, progress_callback=None):
             "-preset", "fast", str(output)
         ], check=True)
 
-    return _finish_clips(best_clips, words, local_clip, number_of_shorts, progress_callback)
-
+    return _finish_clips(
+        best_clips,
+        words,
+        local_clip,
+        number_of_shorts,
+        progress_callback,
+        layout=layout,
+        caption_style=caption_style,
+        highlight_color=highlight_color,
+        enable_emojis=enable_emojis,
+        subtitle_language=subtitle_language,
+        gemini_api_key=gemini_api_key
+    )
 
 
 def _youtube_api_get(endpoint, params, timeout=8):
@@ -487,17 +525,13 @@ def _youtube_api_get(endpoint, params, timeout=8):
 
 
 def _fetch_live_chat_signals(url, api_key, callback):
-    """
-    Read one recent batch from an active livestream chat.
-    This API cannot provide archived chat for an ended stream.
-    """
     if not api_key:
-        _report(callback, "Live-chat scan skipped: YOUTUBE_API_KEY is not configured.", 0.10)
         return []
 
     match = re.search(r"(?:v=|youtu\.be/|live/)([A-Za-z0-9_-]{11})", url)
     if not match:
         return []
+
     video_id = match.group(1)
     try:
         details = _youtube_api_get(
@@ -515,7 +549,6 @@ def _fetch_live_chat_signals(url, api_key, callback):
         chat_id = live.get("activeLiveChatId")
         actual_start = live.get("actualStartTime")
         if not chat_id or not actual_start:
-            _report(callback, "No active live chat found; using captions only.", 0.12)
             return []
 
         from datetime import datetime
@@ -549,32 +582,24 @@ def _fetch_live_chat_signals(url, api_key, callback):
             buckets[bucket] = buckets.get(bucket, 0) + score
 
         signals = [(float(bucket), score) for bucket, score in buckets.items() if score >= 3]
-        _report(
-            callback,
-            f"Scanned {len(chat.get('items', []))} recent live-chat messages.",
-            0.16,
-        )
         return signals
-    except Exception as error:
-        _report(callback, f"Live-chat scan unavailable; continuing with captions: {str(error)[:160]}", 0.12)
+    except Exception:
         return []
 
 
-def _chat_only_clip_candidates(chat_signals, number_of_shorts, duration=40):
-    """Build candidate windows from active-live-chat reaction bursts when captions are absent."""
-    ranked = sorted(chat_signals, key=lambda item: item[1], reverse=True)
-    chosen = []
-    for timestamp, score in ranked:
-        start = max(0.0, float(timestamp) - 10.0)
-        end = start + float(duration)
-        if all(end <= old_start or start >= old_end for old_start, old_end in chosen):
-            chosen.append((start, end))
-        if len(chosen) >= int(number_of_shorts):
-            break
-    return chosen
-
-def process_youtube_video(url, number_of_shorts=5, progress_callback=None, youtube_api_key=None):
-    """Analyze YouTube captions, then retrieve only the selected video ranges."""
+def process_youtube_video(
+    url,
+    number_of_shorts=5,
+    progress_callback=None,
+    youtube_api_key=None,
+    gemini_api_key=None,
+    layout="smart_crop",
+    caption_style="hormozi",
+    highlight_color="yellow",
+    enable_emojis=True,
+    subtitle_language="original"
+):
+    """Analyze YouTube captions with AI, then retrieve and render selected 9:16 ranges."""
     project_dir = Path(__file__).resolve().parent
     os.chdir(project_dir)
     _prepare_folders()
@@ -585,36 +610,29 @@ def process_youtube_video(url, number_of_shorts=5, progress_callback=None, youtu
 
     chat_signals = _fetch_live_chat_signals(url, youtube_api_key, progress_callback)
 
-    caption_error = None
+    caption_result = None
     try:
         caption_result = _fetch_youtube_captions(url, progress_callback)
     except Exception as error:
         caption_result = None
-        caption_error = error
 
     if caption_result:
         segments, words = caption_result
         _report(
             callback=progress_callback,
-            message="Captions loaded! Ranking Hindi/English highlights with chat signals...",
-            progress=0.58,
+            message="Captions loaded! Detecting viral highlights using AI...",
+            progress=0.55,
         )
-        best_clips = _select_clips(
-            segments, number_of_shorts, chat_signals=chat_signals
+        best_clips = detect_viral_highlights(
+            segments,
+            number_of_shorts=number_of_shorts,
+            api_key=gemini_api_key,
+            chat_signals=chat_signals
         )
-    elif chat_signals:
-        words = []
-        _report(
-            progress_callback,
-            "Captions unavailable. Creating candidate timestamps from active live-chat reactions.",
-            0.58,
-        )
-        best_clips = _chat_only_clip_candidates(chat_signals, number_of_shorts)
     else:
-        detail = f" Caption error: {caption_error}" if caption_error else ""
         raise RuntimeError(
-            "No usable YouTube captions or active live-chat signals were available. "
-            "Full video/audio downloading remains disabled." + detail
+            "No usable YouTube captions or transcript could be retrieved automatically for this video. "
+            "Please try another video or upload the video file directly."
         )
 
     if not best_clips:
@@ -624,17 +642,13 @@ def process_youtube_video(url, number_of_shorts=5, progress_callback=None, youtu
         """Download only one selected YouTube time range, not the full source."""
         output.parent.mkdir(parents=True, exist_ok=True)
 
-        # Each clip gets its own yt-dlp download. web_safari commonly exposes
-        # HLS formats, which currently avoid some GVS PO-token requirements.
-        # If that client is unavailable for a video, retry with yt-dlp defaults.
         attempts = [
-            ("web_safari", {"youtube": {"player_client": ["web_safari"]}}),
             ("default", None),
+            ("web_safari", {"youtube": {"player_client": ["web_safari"]}}),
         ]
         errors = []
 
         for client_name, extractor_args in attempts:
-            # Remove leftovers from a failed previous attempt for this clip.
             for stale in output.parent.glob(f"{output.stem}.*"):
                 if stale.is_file():
                     try:
@@ -643,9 +657,8 @@ def process_youtube_video(url, number_of_shorts=5, progress_callback=None, youtu
                         pass
 
             options = {
-                "format": "best",
+                "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
                 "download_ranges": download_range_func(None, [(float(start), float(end))]),
-                "force_keyframes_at_cuts": True,
                 "outtmpl": str(output.with_suffix("")) + ".%(ext)s",
                 "merge_output_format": "mp4",
                 "js_runtimes": {"deno": {}},
@@ -654,8 +667,8 @@ def process_youtube_video(url, number_of_shorts=5, progress_callback=None, youtu
                 "quiet": True,
                 "no_warnings": True,
                 "overwrites": True,
-                "retries": 2,
-                "fragment_retries": 2,
+                "retries": 3,
+                "fragment_retries": 3,
                 "socket_timeout": 30,
             }
             if extractor_args:
@@ -664,8 +677,8 @@ def process_youtube_video(url, number_of_shorts=5, progress_callback=None, youtu
             try:
                 _report(
                     progress_callback,
-                    f"Downloading only {int(end - start)} seconds of selected footage ({client_name} client)...",
-                    0.62,
+                    f"Downloading {int(end - start)}s clip segment ({client_name})...",
+                    0.65,
                 )
                 with yt_dlp.YoutubeDL(options) as ydl:
                     ydl.download([url])
@@ -681,7 +694,6 @@ def process_youtube_video(url, number_of_shorts=5, progress_callback=None, youtu
 
                 downloaded = generated[0]
                 if downloaded != output:
-                    # Normalize the result to the MP4 filename expected by the renderer.
                     command = [
                         "ffmpeg", "-y", "-i", str(downloaded),
                         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
@@ -698,24 +710,21 @@ def process_youtube_video(url, number_of_shorts=5, progress_callback=None, youtu
                 return
 
             except Exception as error:
-                errors.append(f"{client_name}: {str(error)[:700]}")
+                errors.append(f"{client_name}: {str(error)[:400]}")
 
         combined = " | ".join(errors)
-        if "403" in combined or "Forbidden" in combined:
-            raise RuntimeError(
-                "YouTube returned HTTP 403 for the selected video segment with both "
-                "the web_safari and default clients. This update avoids downloading "
-                "the entire source video, but it cannot override a YouTube block on "
-                "the Streamlit Cloud server IP. A PO-token provider may help with "
-                "token-related 403s; it will not fix an IP-level block. Details: "
-                + combined
-            )
-        raise RuntimeError("Could not download the selected YouTube segment. " + combined)
+        raise RuntimeError("Could not download the selected YouTube segment. Details: " + combined)
 
     return _finish_clips(
         best_clips,
         words,
         download_selected_range,
         number_of_shorts,
-        progress_callback
+        progress_callback,
+        layout=layout,
+        caption_style=caption_style,
+        highlight_color=highlight_color,
+        enable_emojis=enable_emojis,
+        subtitle_language=subtitle_language,
+        gemini_api_key=gemini_api_key
     )

@@ -17,6 +17,9 @@ temp/
 *.wav
 *.log
 transcripts.txt
+transcript.txt
+*.db
+users.db
 
 # Backups and local launcher
 main_backup*.py
@@ -25,3 +28,4 @@ Start*.bat
 
 # Other
 .DS_Store
+.agents/

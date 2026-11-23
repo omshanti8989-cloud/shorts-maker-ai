@@ -1,5 +1,8 @@
-streamlit
+streamlit>=1.35.0
 yt-dlp[default]>=2025.05.22
-faster-whisper==1.1.1
-av==18.1.0
-google-api-python-client
+faster-whisper>=1.1.1
+google-genai>=3.0.0
+opencv-python-headless>=4.10.0
+numpy>=1.26.0
+google-api-python-client>=2.100.0
+av>=12.0.0
