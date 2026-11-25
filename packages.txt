@@ -2,3 +2,8 @@ ffmpeg
 libgl1
 libglib2.0-0
 fontconfig
+fonts-noto-core
+fonts-noto-cjk
+fonts-deva
+libsm6
+libxext6

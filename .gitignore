@@ -1,31 +1,70 @@
-# Python
+# ==========================================
+# Python & Virtual Environments
+# ==========================================
 venv/
+env/
+ENV/
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
 
-# Secrets
+# ==========================================
+# Sensitive API Keys & Credentials (NEVER COMMIT)
+# ==========================================
 .env
 .env.*
 .streamlit/secrets.toml
+client_secret.json
+token.json
+api key.txt
+*.key
+*.pem
+credentials.json
 
-# Generated files
+# ==========================================
+# Database & Subscription Records
+# ==========================================
+*.db
+*.sqlite3
+users.db
+subscriptions.db
+
+# ==========================================
+# Temporary & Generated Media Files
+# ==========================================
 downloads/
 clips/
+subtitles/
 temp/
 *.mp4
 *.mp3
 *.wav
+*.mkv
+*.webm
+*.avi
+*.mov
+*.ass
+*.srt
 *.log
-transcripts.txt
 transcript.txt
-*.db
-users.db
+transcripts.txt
+spike_events.json
 
-# Backups and local launcher
-main_backup*.py
+# ==========================================
+# Local Backups & Local Launchers
+# ==========================================
+backup/
+*_backup*.py
+*_previous.py
 test_captions.py
 Start*.bat
 
-# Other
+# ==========================================
+# OS & IDE Specific
+# ==========================================
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/
 .agents/

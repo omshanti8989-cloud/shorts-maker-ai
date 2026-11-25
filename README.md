@@ -1,59 +1,96 @@
-# 🎬 Shorts Maker AI
+# 🎬 Shorts Maker AI - Automated Viral Video to Shorts SaaS
 
-An AI-powered web application that turns long YouTube videos and downloaded files into viral, high-retention vertical Shorts & Instagram Reels (9:16).
+Transform long YouTube videos and local video recordings into high-converting 9:16 vertical Shorts, Reels, and TikToks with automated speech recognition, Smart Face Tracking, viral highlight scoring, bouncing animated subtitles, and integrated **Razorpay** subscription payments.
 
 ---
 
 ## ✨ Features
 
-- 🎁 **1 Free Video + Pro Subscription Engine:**
-  - Built-in SQLite user and credit management (`users.db`).
-  - Users enter their email to claim **1 Free Video Conversion**.
-  - Subsequent videos trigger the high-converting **Pro Subscription Paywall**.
-  - **Razorpay Integration:** Supports UPI (PhonePe, Google Pay, Paytm), Cards, and Netbanking (₹499/month).
-  - Built-in Simulation/Test mode for instant testing without paying.
-
-- 🎯 **Smart Face Tracking & Auto-Reframing:**
-  - Uses OpenCV computer vision to automatically detect and follow active speakers.
-  - Crops 16:9 widescreen footage into full-screen 9:16 vertical video with smooth framing.
-  - Supports **Dual-Speaker Split Screen** (Top/Bottom) for interviews and podcasts.
-  - Optional **Ambient Blurred Background** mode.
-
-- 🤖 **Gemini AI Viral Moment Selection:**
-  - Ingests word-level transcripts and prompts Google Gemini to identify the highest retention 25–60s segments.
-  - Rates clips with a **Viral Score (1-100)**, generates engaging titles, hooks, and punchline rationale.
-  - Automatic fallback to lexical heuristic & live-chat reaction burst scoring if no API key is provided.
-
-- 🔥 **Dynamic Animated Captions (Hormozi & MrBeast Style):**
-  - Word-by-word karaoke highlighting with pop/bounce scaling.
-  - Preset styles: **Hormozi**, **MrBeast**, **Clean Minimalist**, and **Cyber Neon**.
-  - Customizable active word highlight colors (Yellow, Green, Cyan, Orange, Magenta).
-  - **Contextual Emojis:** Automatically adds dynamic emojis (💰 for money, 🔥 for hype, 😱 for shock, 🏆 for win).
-  - Strictly sequential, non-overlapping subtitle events with Devanagari font support for Hindi, Hinglish, and English.
-
-- ⚡ **Optimized Ingestion & Processing:**
-  - YouTube WebVTT caption fast-path avoiding full video downloads just to transcribe.
-  - Selective time-range downloading via `yt-dlp` (`download_ranges`) to fetch only the chosen clip seconds.
-  - Asynchronous background rendering with FFmpeg.
+- **🎯 Smart Face Tracking & 9:16 Auto-Crop**: Uses OpenCV to track active speakers smoothly, keeping faces centered in vertical format. Also supports blurred background and dual-speaker split screen.
+- **🔥 Bouncing ASS Captions**: Synchronized multi-word animated captions with keyword color pop effects (Hormozi, MrBeast, Neon presets in Hindi, Hinglish, and English).
+- **🤖 Gemini AI Viral Moment Detection**: Scans transcripts for curiosity hooks, question prompts, and emotional triggers to automatically extract high-retention clips.
+- **💳 Razorpay Payment & Subscription Gateway**: Integrated with Razorpay Checkout for instant plan upgrades (UPI, Google Pay, PhonePe, Cards, NetBanking). Funds settle directly into your linked merchant bank account.
+- **⚡ Faster-Whisper Powered**: CPU and GPU-optimized transcription pipeline with zero unnecessary audio re-encodes.
+- **☁️ Cloud & Docker Ready**: Pre-configured with `Dockerfile`, `packages.txt`, and `.env.example` for instant deployment on Streamlit Cloud, Render, Railway, or AWS.
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick Start (Local Setup)
 
-### 1. Install Dependencies
-Ensure you have [FFmpeg](https://ffmpeg.org/) installed and available in your system `PATH`.
+### 1. Prerequisites
+- **Python 3.10+**
+- **FFmpeg**: Ensure FFmpeg is installed and added to your system `PATH`.
+  - Windows: `winget install Gyan.FFmpeg`
+  - Linux: `sudo apt-get install -y ffmpeg`
 
+### 2. Clone and Install
 ```bash
+git clone https://github.com/omshanti8989-cloud/shorts-maker-ai.git
+cd shorts-maker-ai
+
+# Create virtual environment
+python -m venv venv
+# Windows:
+.\venv\Scripts\activate
+# Linux/Mac:
+source venv/bin/activate
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 2. Run the Web Application
+### 3. Launch App
 ```bash
 streamlit run app.py
 ```
 
-### 3. (Optional) Configuration & API Keys
-You can input your keys in the web sidebar, or define them in `.streamlit/secrets.toml`:
-- `GEMINI_API_KEY`: For LLM viral moment selection and scoring.
-- `YOUTUBE_API_KEY`: For searching trending YouTube videos and channel uploads.
-- `RAZORPAY_KEY_ID` & `RAZORPAY_KEY_SECRET`: For accepting payments in INR via UPI/cards.
+---
+
+## 💳 Razorpay Payment Setup (How Money Reaches Your Bank)
+
+1. Sign up on [Razorpay](https://razorpay.com) and complete KYC verification.
+2. Go to **Account & Settings > API Keys** and generate:
+   - `RAZORPAY_KEY_ID` (starts with `rzp_live_...` or `rzp_test_...`)
+   - `RAZORPAY_KEY_SECRET`
+3. Enter your linked bank account in the Razorpay Dashboard (where payouts are deposited via standard T+2 settlement).
+4. Configure your keys:
+   - Locally: Create a `.env` file (copy from `.env.example`) or configure in `.streamlit/secrets.toml`.
+   - In Cloud: Add them as Environment Variables in your hosting dashboard.
+
+---
+
+## ☁️ Cloud Deployment Options
+
+### Option A: Streamlit Community Cloud (Recommended & Free)
+1. Push this repository to GitHub.
+2. Visit [share.streamlit.io](https://share.streamlit.io/) and select your repository.
+3. Set the main file path to `app.py`.
+4. Under **Advanced Settings > Secrets**, paste the keys from `.streamlit/secrets.toml.example`.
+5. Streamlit Cloud automatically installs FFmpeg from `packages.txt`!
+
+### Option B: Docker Container (Render, Railway, DigitalOcean, AWS EC2)
+Build and run using Docker:
+```bash
+docker build -t shorts-maker-ai .
+docker run -p 8501:8501 --env-file .env shorts-maker-ai
+```
+Or using Docker Compose:
+```bash
+docker-compose up -d
+```
+
+---
+
+## 🔒 Security Notice
+
+**Never commit private keys, credentials, or downloaded videos to GitHub.**
+The repository includes a comprehensive `.gitignore` that automatically excludes:
+- `client_secret.json`, `token.json`, `api key.txt`
+- `.streamlit/secrets.toml`, `.env`
+- `downloads/`, `clips/`, `subtitles/`, and temporary video files
+- `users.db` and SQLite databases
+
+---
+
+## 📄 License
+MIT License. Built for creators and developers.

@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  shorts-maker-ai:
+    build: .
+    container_name: shorts_maker_ai
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      - RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID:-}
+      - RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - YOUTUBE_API_KEY=${YOUTUBE_API_KEY:-}
+      - PRO_PRICE_INR=${PRO_PRICE_INR:-699}
+    volumes:
+      - ./downloads:/app/downloads
+      - ./clips:/app/clips
+      - ./subtitles:/app/subtitles

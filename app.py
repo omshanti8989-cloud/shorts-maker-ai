@@ -1,5 +1,7 @@
 import os
+import io
 import uuid
+import zipfile
 from pathlib import Path
 
 import streamlit as st
@@ -359,10 +361,10 @@ with col_layout:
 col_lang, col_style = st.columns(2)
 
 language_options = {
-    "original": "🌐 Auto / Original Video Language",
-    "hi": "🇮🇳 Hindi (हिन्दी - देवनागरी)",
-    "hinglish": "🔥 Hinglish (Viral Roman Hindi - e.g. 'Yeh trick dekho')",
-    "en": "🇬🇧 English"
+    "hinglish": "🔥 Hinglish (Natural Roman Hindi + English - Recommended)",
+    "en": "🇬🇧 English (Full English Translation)",
+    "original": "🌐 Original Audio Language",
+    "hi": "🇮🇳 Pure Hindi (हिन्दी - देवनागरी)"
 }
 with col_lang:
     selected_language = st.selectbox(
@@ -370,7 +372,7 @@ with col_lang:
         list(language_options.keys()),
         format_func=lambda k: language_options[k],
         index=0,
-        help="Choose Hindi (हिन्दी देवनागरी), viral Hinglish, English, or keep the original language."
+        help="Hinglish: English speech stays in English, Hindi speech is converted to Roman Hinglish (no pure Devanagari)."
     )
 
 style_names = {
@@ -414,52 +416,87 @@ if not user_email:
 can_generate, reason, user_info = database.can_generate_video(user_email)
 
 if not can_generate:
-    pro_price = int(get_secret("PRO_PRICE_INR", getattr(payments, "DEFAULT_PRICE_INR", 99)))
-
-    # PAYWALL / SUBSCRIPTION CARD
-    st.markdown(f"""
-    <div class="pricing-card">
-        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
-            <div>
-                <span class="viral-badge">🔒 FREE TRIAL USED</span>
-                <h2 style="margin:5px 0 0 0; color:white;">Upgrade to Shorts Maker Pro</h2>
-            </div>
-            <div>
-                <span class="pricing-price">₹{pro_price}</span>
-                <span style="color:#94A3B8; font-size:1.1rem; font-weight:600;">/ month</span>
-            </div>
-        </div>
-        <p style="color:#CBD5E1; margin: 15px 0 20px 0; font-size:1.05rem;">
-            You have generated your <strong>1 free video</strong>! To convert more videos, subscribe to Pro for unlimited high-retention Shorts.
-        </p>
-        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 25px; color:#F1F5F9;">
-            <div>⚡ <strong>Unlimited</strong> Short Creations</div>
-            <div>🎯 <strong>Smart Face Tracking</strong> 9:16 Crop</div>
-            <div>👥 <strong>Dual-Speaker</strong> Split Screen</div>
-            <div>🇮🇳 <strong>Hindi & Hinglish</strong> AI Subtitles</div>
-            <div>🔥 <strong>Hormozi & MrBeast</strong> Captions</div>
-            <div>✨ <strong>Animated Emojis</strong> & Highlights</div>
-            <div>🚀 <strong>Priority Render Queue</strong> & 1080p HD</div>
-        </div>
+    st.markdown("""
+    <div style="text-align: center; margin-bottom: 20px;">
+        <span class="viral-badge">🔒 FREE CREDIT USED</span>
+        <h2 style="color: white; margin-top: 5px;">Choose Your Plan to Continue Generating</h2>
+        <p style="color: #94A3B8;">Payments are securely processed via Razorpay (UPI, GPay, PhonePe, Cards, NetBanking). Funds settle directly into your bank account.</p>
     </div>
     """, unsafe_allow_html=True)
 
-    pay_col1, pay_col2 = st.columns([2, 1])
-    with pay_col1:
-        if st.button(f"⚡ Subscribe to Pro (₹{pro_price} / month)", type="primary", use_container_width=True):
-            res = payments.create_razorpay_payment_link(user_email, amount_inr=pro_price)
-            if res.get("payment_url"):
-                st.markdown(f"👉 **[Click Here to Complete Razorpay Payment]({res['payment_url']})**")
-            else:
-                database.activate_subscription(user_email)
-                st.success("🎉 Payment verified! Pro Subscription activated. You now have unlimited Shorts.")
-                st.rerun()
+    plan_cols = st.columns(len(payments.SUBSCRIPTION_PLANS))
+    for idx, (p_key, p_data) in enumerate(payments.SUBSCRIPTION_PLANS.items()):
+        with plan_cols[idx]:
+            st.markdown(f"""
+            <div class="pricing-card" style="min-height: 380px;">
+                <h3 style="color: #F8FAFC; margin-bottom: 5px;">{p_data['name']}</h3>
+                <div class="pricing-price">₹{p_data['price_inr']}</div>
+                <div style="color: #94A3B8; font-size: 0.85rem; margin-bottom: 15px;">billed {p_data['period']}</div>
+                <hr style="border-color: rgba(255,255,255,0.1); margin-bottom: 15px;" />
+                <ul style="padding-left: 20px; font-size: 0.9rem; color: #E2E8F0; text-align: left;">
+                    {''.join(f'<li>{f}</li>' for f in p_data['features'])}
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
 
-    with pay_col2:
-        if st.button("🧪 Simulate Payment (Instant Pro)", use_container_width=True, help="Simulate a successful payment for testing"):
-            database.activate_subscription(user_email)
-            st.success("Pro Subscription unlocked for testing!")
-            st.rerun()
+            if st.button(f"Choose {p_data['name']}", key=f"sel_plan_{p_key}", use_container_width=True, type="primary" if p_key == "pro" else "secondary"):
+                st.session_state["active_checkout_plan"] = p_key
+                try:
+                    order = payments.create_razorpay_order(p_key, user_email)
+                    st.session_state["active_order"] = order
+                except Exception as ex:
+                    st.error(f"Order creation failed: {ex}")
+
+    # Active Checkout Box
+    if "active_order" in st.session_state and "active_checkout_plan" in st.session_state:
+        st.divider()
+        st.markdown("### 🔒 Secure Razorpay Checkout")
+        active_plan_info = payments.SUBSCRIPTION_PLANS[st.session_state["active_checkout_plan"]]
+        order_info = st.session_state["active_order"]
+
+        k_id, _ = payments.get_razorpay_credentials()
+
+        checkout_html = payments.generate_checkout_html(
+            order_id=order_info["order_id"],
+            amount_paise=active_plan_info["amount_paise"],
+            plan_name=active_plan_info["name"],
+            key_id=k_id or "rzp_test_simulation",
+            user_email=user_email
+        )
+
+        st.components.v1.html(checkout_html, height=200)
+
+        st.markdown("#### Confirm Payment / Instant Credit")
+        with st.form("verify_payment_form"):
+            c_v1, c_v2 = st.columns(2)
+            with c_v1:
+                payment_id_in = st.text_input(
+                    "Razorpay Payment ID",
+                    placeholder="e.g. pay_NxZ89f92..." if not order_info.get("is_simulation") else "simulated_payment",
+                    value="simulated_payment" if order_info.get("is_simulation") else ""
+                )
+            with c_v2:
+                sig_in = st.text_input(
+                    "Payment Signature (Optional in simulation)",
+                    placeholder="Signature hash from Razorpay",
+                    value="simulated_signature" if order_info.get("is_simulation") else ""
+                )
+
+            submit_btn = st.form_submit_button("✅ Verify & Activate Subscription", use_container_width=True)
+            if submit_btn:
+                is_valid = payments.verify_payment_signature(
+                    order_info["order_id"],
+                    payment_id_in.strip(),
+                    sig_in.strip()
+                )
+                if is_valid:
+                    database.activate_subscription(user_email, plan=st.session_state["active_checkout_plan"])
+                    st.balloons()
+                    st.success(f"🎉 Payment verified! {active_plan_info['name']} subscription activated.")
+                    del st.session_state["active_order"]
+                    st.rerun()
+                else:
+                    st.error("❌ Verification failed. Please ensure the Payment ID matches your transaction.")
 
     st.stop()
 
@@ -576,6 +613,21 @@ if start_btn:
                         use_container_width=True
                     )
                 st.write("")
+
+        if len(results) > 1:
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w") as zf:
+                for idx, r_file in enumerate(results, 1):
+                    p = Path(str(r_file))
+                    zf.write(p, arcname=f"short_{idx}_{p.name}")
+            zip_buffer.seek(0)
+            st.download_button(
+                label="📦 Download All Generated Shorts as ZIP",
+                data=zip_buffer,
+                file_name="shorts_maker_all_clips.zip",
+                mime="application/zip",
+                use_container_width=True
+            )
 
     except Exception as error:
         st.error(f"Processing failed: {error}")

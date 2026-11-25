@@ -390,7 +390,7 @@ def _finish_clips(
     caption_style="hormozi",
     highlight_color="yellow",
     enable_emojis=True,
-    subtitle_language="original",
+    subtitle_language="hinglish",
     gemini_api_key=None
 ):
     total = len(best_clips)
@@ -423,15 +423,18 @@ def _finish_clips(
             if word["start"] >= start and word["end"] <= end
         ]
 
-        # Handle Subtitle Translation (Hindi / Hinglish / English)
-        if subtitle_language and subtitle_language != "original":
-            lang_label = "Hindi (हिन्दी)" if subtitle_language == "hi" else ("Hinglish" if subtitle_language == "hinglish" else subtitle_language)
-            _report(callback, f"Generating {lang_label} subtitles with AI...", 0.68 + (i - 1) / total * 0.08)
-            clip_words = translate_words_to_language(
-                clip_words,
-                target_language=subtitle_language,
-                api_key=gemini_api_key
-            )
+        # Handle Subtitle Translation (Hinglish: Roman Hindi + English; English: English; Hindi: Devanagari)
+        sub_lang = subtitle_language or "hinglish"
+        if sub_lang == "original":
+            sub_lang = "hinglish"
+
+        lang_label = "Hinglish (Roman)" if sub_lang == "hinglish" else ("English" if sub_lang == "en" else "Hindi")
+        _report(callback, f"Generating {lang_label} captions...", 0.68 + (i - 1) / total * 0.08)
+        clip_words = translate_words_to_language(
+            clip_words,
+            target_language=sub_lang,
+            api_key=gemini_api_key
+        )
 
         subtitle_path = _make_captions(
             clip_words,
@@ -470,7 +473,7 @@ def process_video(
     caption_style="hormozi",
     highlight_color="yellow",
     enable_emojis=True,
-    subtitle_language="original"
+    subtitle_language="hinglish"
 ):
     """Process an uploaded local video file into vertical Shorts."""
     project_dir = Path(__file__).resolve().parent
@@ -597,7 +600,7 @@ def process_youtube_video(
     caption_style="hormozi",
     highlight_color="yellow",
     enable_emojis=True,
-    subtitle_language="original"
+    subtitle_language="hinglish"
 ):
     """Analyze YouTube captions with AI, then retrieve and render selected 9:16 ranges."""
     project_dir = Path(__file__).resolve().parent
